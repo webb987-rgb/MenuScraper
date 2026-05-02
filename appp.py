@@ -20,7 +20,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🍔 Wolt Menu Scraper")
-st.markdown("Fokusirano na Glovo import i Menu pregled (bez PDF-a).")
+st.markdown("v5.")
 
 # --- POMOĆNE FUNKCIJE ---
 def fetch_data(slug):
