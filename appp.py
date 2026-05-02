@@ -4,12 +4,13 @@ import pandas as pd
 import io
 import zipfile
 import re
+import uuid # NOVO: Za generisanje Glovo ID-jeva
 
 # 1. Konfiguracija stranice
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
 
 st.title("🍔 Wolt Menu Scraper")
-st.markdown("Sajt prikazuje samo bitne informacije, dok Excel sadrži sve kolone za Glovo.")
+st.markdown("Generiše čiste **UUID** identifikatore koje Glovo uvek prihvata.")
 
 # --- POMOĆNE FUNKCIJE ---
 def get_slug(url):
@@ -36,35 +37,57 @@ def process_all_data(data):
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
-    # 2. Generisanje tabela atributa
+    # 2. GENERISANJE NOVIH UUID-jeva ZA GRUPE I ATRIBUTE
+    wolt_group_to_uuid = {}
+    wolt_attr_to_uuid = {}
+    
     groups_raw, attributes_raw = [], []
+    
     for group in data.get("options", []):
-        g_id, g_name = group.get("id"), group.get("name", "Prilog")
-        groups_raw.append({
-            "External_ID": g_id, "Name": g_name, "Max": 10, "Min": 0,
-            "Multiple_Selection": "NO", "Collapse_by_Default": "NO"
-        })
+        w_gid = group.get("id")
+        new_gid = str(uuid.uuid4()) # Pravimo novi Glovo ID
+        wolt_group_to_uuid[w_gid] = new_gid
+        
+        g_name = group.get("name", "Prilog")
+        
+        # Sakupljamo atribute za ovu grupu
+        current_group_attrs = []
         for val in group.get("values", []):
+            w_aid = val.get("id")
+            new_aid = str(uuid.uuid4()) # Pravimo novi Glovo ID za svaki prilog
+            wolt_attr_to_uuid[w_aid] = new_aid
+            current_group_attrs.append(new_aid)
+            
             attributes_raw.append({
-                "External_ID": val.get("id"), "Attribute_Group_ID": g_id,
-                "Name": val.get("name", ""), "Price": val.get("price", 0) / 100,
-                "Enabled": "YES", "Selected_by_Default": "NO"
+                "External_ID": new_aid,
+                "Name": val.get("name", ""),
+                "Price": val.get("price", 0) / 100,
+                "Enabled": "YES",
+                "Selected_by_Default": "NO"
             })
+            
+        groups_raw.append({
+            "External_ID": new_gid,
+            "Name": g_name,
+            "Max": 10, "Min": 0,
+            "Multiple_Selection": "NO",
+            "Collapse_by_Default": "NO",
+            "Attributes": ", ".join(current_group_attrs)
+        })
 
-    df_groups_base = pd.DataFrame(groups_raw).drop_duplicates()
-    df_attributes_final = pd.DataFrame(attributes_raw)
-    attr_mapping = df_attributes_final.groupby("Attribute_Group_ID")["External_ID"].apply(lambda x: ", ".join(x)).reset_index()
-    df_groups_final = pd.merge(df_groups_base, attr_mapping, left_on="External_ID", right_on="Attribute_Group_ID", how="left")
-    df_groups_final = df_groups_final.drop(columns=["Attribute_Group_ID"]).rename(columns={"External_ID_y": "Attributes", "External_ID_x": "External_ID"})
-    df_attributes_export = df_attributes_final.drop(columns=["Attribute_Group_ID"])
+    df_groups_final = pd.DataFrame(groups_raw)
+    df_attributes_export = pd.DataFrame(attributes_raw)
 
-    # 3. Artikli (Sa svim Glovo kolonama)
+    # 3. GENERISANJE NOVIH UUID-jeva ZA ARTIKLE
     items_list, seen_ids = [], set()
     for item in data.get("items", []):
-        i_id = item.get("id")
-        if not i_id or i_id in seen_ids: continue
-        seen_ids.add(i_id)
+        w_iid = item.get("id")
+        if not w_iid or w_iid in seen_ids: continue
+        seen_ids.add(w_iid)
+        
+        new_iid = str(uuid.uuid4()) # Novi ID za artikal
 
+        # Slika (ostaje interna za ZIP, prazna za Excel)
         image_url = ""
         main_img = item.get("main_image")
         if isinstance(main_img, dict) and main_img.get("id"):
@@ -72,15 +95,23 @@ def process_all_data(data):
         elif item.get("images") and len(item.get("images")) > 0:
             image_url = item.get("images")[0].get("url", "")
 
+        # Povezivanje na NOVE ID-jeve grupa
+        item_opts = item.get("options", [])
+        connected_new_gids = []
+        for opt_entry in item_opts:
+            w_target_id = opt_entry.get("option_id")
+            if w_target_id in wolt_group_to_uuid:
+                connected_new_gids.append(wolt_group_to_uuid[w_target_id])
+
         items_list.append({
-            "External_ID": i_id,
+            "External_ID": new_iid,
             "Product_Name": item.get("name", ""),
             "Collection": "MENI",
-            "Section": item_to_section.get(i_id, "Ostalo"),
+            "Section": item_to_section.get(w_iid, "Ostalo"),
             "Price": int((item.get("price") or item.get("base_price") or 0) / 100),
             "Image_1": image_url,
             "Description": item.get("description", "").replace("\n", " ").strip(),
-            "Attribute_Groups": ", ".join([o.get("option_id") for o in item.get("options", []) if o.get("option_id")]),
+            "Attribute_Groups": ", ".join(connected_new_gids),
             "Is_Alcoholic": "NO", "Is_Tobacco": "NO", "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
         })
     
@@ -88,17 +119,17 @@ def process_all_data(data):
     return df_products, df_groups_final, df_attributes_export
 
 # --- UI ---
-link_input = st.text_input("Nalepi Wolt link restorana:")
+link_input = st.text_input("Nalepi link restorana:")
 
 if st.button("🚀 POKRENI"):
     if link_input:
-        with st.spinner("Sakupljam podatke..."):
+        with st.spinner("Generišem Glovo UUID-jeve..."):
             slug = get_slug(link_input)
             raw = fetch_data(slug)
             if raw:
                 st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = process_all_data(raw)
                 st.session_state['slug'] = slug
-                st.success("Sve učitano!")
+                st.success("Spremno! Generisani su novi Glovo ID-jevi.")
 
 if 'df_p' in st.session_state:
     df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
@@ -106,9 +137,8 @@ if 'df_p' in st.session_state:
     st.markdown("### 📥 Download zona")
     c1, c2, _ = st.columns([1, 1.2, 4])
     with c1:
-        # EXPORT: Ovde zadržavamo sve kolone, ali praznimo linkove do slika (Glovo format)
         df_excel = df_p.copy()
-        df_excel['Image_1'] = ""
+        df_excel['Image_1'] = "" # Brišemo linkove za Glovo upload
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_excel.to_excel(writer, index=False, sheet_name='Products')
@@ -129,27 +159,14 @@ if 'df_p' in st.session_state:
             st.download_button("🔥 SKINI ZIP", zip_io.getvalue(), f"Slike_{slug}.zip")
 
     st.markdown("---")
-    tab_raw, tab_tree = st.tabs(["📊 PREGLED TABELA", "🔍 HIJERARHIJA"])
+    tab_raw, tab_tree = st.tabs(["📊 TABELE", "🔍 HIJERARHIJA"])
 
     with tab_raw:
-        # --- UI PRIKAZ: Ovde prikazujemo samo bitne kolone ---
-        ui_columns = ["Product_Name", "Section", "Price", "Image_1", "Description", "Attribute_Groups"]
-        
-        st.write("**Products (Prikazane samo bitne kolone)**")
-        st.dataframe(
-            df_p[ui_columns], # Filtriramo kolone za sajt
-            hide_index=True,
-            column_config={
-                "Image_1": st.column_config.LinkColumn("Slika", display_text="Otvori sliku 🔗")
-            }
-        )
-        
-        # Prikaz grupa i atributa (isto filtrirano ako treba, ali ovde su bitne sve kolone)
-        st.write("**Attribute Groups**")
-        st.dataframe(df_g[["Name", "Attributes", "Max", "Min"]], hide_index=True)
-        
-        st.write("**Attributes**")
-        st.dataframe(df_a[["Name", "Price", "Enabled"]], hide_index=True)
+        ui_cols = ["Product_Name", "Section", "Price", "External_ID", "Attribute_Groups"]
+        st.write("**Products (Pregled novih ID-jeva)**")
+        st.dataframe(df_p[ui_cols], hide_index=True)
+        st.write("**Attribute Groups**"); st.dataframe(df_g, hide_index=True)
+        st.write("**Attributes**"); st.dataframe(df_a, hide_index=True)
 
     with tab_tree:
         for section in df_p['Section'].unique():
