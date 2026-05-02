@@ -10,19 +10,23 @@ from fpdf import FPDF
 # 1. Konfiguracija stranice
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
 
-# CSS za sitniji prikaz
-st.markdown("""
-    <style>
-    .stExpander { border: none !important; margin-bottom: -10px !important; }
-    .stExpander [data-testid="stExpanderDetails"] { padding-top: 0px !important; padding-left: 25px !important; }
-    .stMarkdown p { font-size: 14px !important; margin-bottom: 2px !important; }
-    [data-testid="column"] { width: fit-content !important; min-width: fit-content !important; flex: none !important; padding-right: 10px !important; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- FUNKCIJA ZA ČIŠĆENJE TEKSTA (Sređuje č,ć,š za PDF) ---
+def latin_cleanup(text):
+    if not isinstance(text, str):
+        return str(text)
+    # Mapiranje naših slova u obična latinica slova
+    mapping = {
+        "č": "c", "Č": "C",
+        "ć": "c", "Ć": "C",
+        "š": "s", "Š": "S",
+        "ž": "z", "Ž": "Z",
+        "đ": "dj", "Đ": "Dj"
+    }
+    for serbian_char, latin_char in mapping.items():
+        text = text.replace(serbian_char, latin_char)
+    return text
 
-st.title("🍔 Wolt Menu Scraper")
-
-# --- PDF GENERATOR (PO TVOM FORMATU) ---
+# --- POPRAVLJEN PDF GENERATOR ---
 def create_clean_pdf(df_p, df_g, df_a):
     pdf = FPDF()
     pdf.add_page()
@@ -34,51 +38,55 @@ def create_clean_pdf(df_p, df_g, df_a):
     pdf.ln(10)
 
     for section in df_p['Section'].unique():
-        # Kategorija
+        # Kategorija - ČISTIMO TEKST
+        clean_section = latin_cleanup(str(section).upper())
         pdf.set_fill_color(240, 240, 240)
         pdf.set_font("Arial", 'B', 14)
-        pdf.cell(0, 10, txt=str(section).upper(), ln=True, align='L', fill=True)
+        pdf.cell(0, 10, txt=clean_section, ln=True, align='L', fill=True)
         pdf.ln(4)
         
         section_products = df_p[df_p['Section'] == section]
         for _, prod in section_products.iterrows():
-            # Jelo i Cena
+            # Jelo i Cena - ČISTIMO TEKST
+            clean_name = latin_cleanup(prod['Product_Name'])
             pdf.set_font("Arial", 'B', 11)
-            pdf.cell(0, 7, txt=f"{prod['Product_Name']} ............................................ {prod['Price']} RSD", ln=True)
+            pdf.cell(0, 7, txt=f"{clean_name} ............................................ {prod['Price']} RSD", ln=True)
             
-            # Opis
+            # Opis - ČISTIMO TEKST
             if prod['Description']:
+                clean_desc = latin_cleanup(prod['Description'])
                 pdf.set_font("Arial", 'I', 9)
-                pdf.multi_cell(0, 5, txt=str(prod['Description']))
+                pdf.multi_cell(0, 5, txt=clean_desc)
             
-            # Grupe i Atributi (Bez ID-jeva)
+            # Grupe i Atributi
             g_ids = [gid for gid in str(prod['Attribute_Groups']).split(",") if gid]
             if g_ids:
                 for gid in g_ids:
                     g_info = df_g[df_g['External_ID'] == gid]
                     if not g_info.empty:
+                        clean_group_name = latin_cleanup(g_info.iloc[0]['Name'])
                         pdf.set_font("Arial", 'B', 9)
-                        pdf.set_x(15) # Malo uvlačenje
-                        pdf.cell(0, 6, txt=f"   {g_info.iloc[0]['Name']}:", ln=True)
+                        pdf.set_x(15)
+                        pdf.cell(0, 6, txt=f"   {clean_group_name}:", ln=True)
                         
                         rel_attrs = df_a[df_a['Group_ID_Internal'] == gid]
                         pdf.set_font("Arial", '', 8)
-                        # Sakupljamo priloge u jedan red da ne trošimo previše papira
                         attr_list = []
                         for _, attr in rel_attrs.iterrows():
-                            p_val = f"+{attr['Price']} RSD" if attr['Price'] > 0 else "Gratis"
-                            attr_list.append(f"{attr['Name']} ({p_val})")
+                            p_val = f"+{attr['Price']} RSD" if attr['Price'] > 0 else "0"
+                            clean_attr_name = latin_cleanup(attr['Name'])
+                            attr_list.append(f"{clean_attr_name} ({p_val})")
                         
                         pdf.set_x(20)
                         pdf.multi_cell(0, 5, txt=", ".join(attr_list))
             
-            pdf.ln(4) # Razmak između jela
-        pdf.ln(6) # Razmak između kategorija
+            pdf.ln(4)
+        pdf.ln(6)
     
-    # Vraćamo PDF kao bajtove
-    return pdf.output(dest='S').encode('latin-1', errors='replace')
+    # 'latin-1' sada prolazi jer smo uradili cleanup
+    return pdf.output(dest='S').encode('latin-1', errors='ignore')
 
-# --- POMOĆNE FUNKCIJE ---
+# --- OSTATAK KODA (Funcije za scrapovanje ostaju iste) ---
 def get_slug(url):
     return url.strip().rstrip('/').split('/')[-1]
 
@@ -95,14 +103,12 @@ def fetch_data(slug):
     except: return None
 
 def process_all_data(data):
-    # 1. Kategorije
     item_to_section = {}
     for cat in data.get("categories", []):
         cat_name = cat.get("name", "Meni")
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
-    # 2. Atributi
     wolt_group_to_new_id = {}
     groups_raw, attributes_raw = [], []
     for group in data.get("options", []):
@@ -124,13 +130,11 @@ def process_all_data(data):
             "Attributes": ",".join(current_group_attr_ids)
         })
 
-    # 3. Proizvodi
     df_p, seen_ids = [], set()
     for item in data.get("items", []):
         w_iid = item.get("id")
         if not w_iid or w_iid in seen_ids: continue
         seen_ids.add(w_iid)
-        
         new_iid = str(uuid.uuid4())
         img_url = ""
         main_img = item.get("main_image")
@@ -150,7 +154,7 @@ def process_all_data(data):
     
     return pd.DataFrame(df_p).sort_values(by=["Section", "Product_Name"]), pd.DataFrame(groups_raw), pd.DataFrame(attributes_raw)
 
-# --- UI INTERFEJS ---
+# --- UI ---
 link_input = st.text_input("Nalepi link restorana:")
 
 if st.button("🚀 POKRENI"):
@@ -165,12 +169,12 @@ if st.button("🚀 POKRENI"):
 if 'df_p' in st.session_state:
     df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
 
-    # --- DOWNLOAD SEKCIJA (Zbijeno skroz levo) ---
     st.markdown("### 📥 Download")
+    # Zbijena dugmad
+    st.markdown("""<style>[data-testid="column"] {width: fit-content !important; min-width: fit-content !important; flex: none !important; padding-right: 10px !important;}</style>""", unsafe_allow_html=True)
     c1, c2, c3, _ = st.columns([1, 1, 1, 4])
     
     with c1:
-        # Excel za Glovo
         df_excel = df_p.copy()
         df_excel['Image_1'] = ""
         output = io.BytesIO()
@@ -193,13 +197,10 @@ if 'df_p' in st.session_state:
             st.download_button("🔥 ZIP", zip_io.getvalue(), f"Slike_{slug}.zip")
             
     with c3:
-        # PDF Meni (Čist format)
         pdf_data = create_clean_pdf(df_p, df_g, df_a)
         st.download_button("📄 PDF", pdf_data, f"Jelovnik_{slug}.pdf", "application/pdf")
 
     st.markdown("---")
-    
-    # --- TABOVI ---
     tab_menu, tab_raw = st.tabs(["🌳 MENU", "📊 SIROVI PODACI"])
 
     with tab_menu:
@@ -215,8 +216,7 @@ if 'df_p' in st.session_state:
                             with st.expander(f"└ {g_info.iloc[0]['Name']}"):
                                 rel_attrs = df_a[df_a['Group_ID_Internal'] == gid]
                                 for _, attr in rel_attrs.iterrows():
-                                    price_txt = f"+{attr['Price']} RSD" if attr['Price'] > 0 else "Gratis"
-                                    st.write(f"• {attr['Name']} ({price_txt})")
+                                    st.write(f"• {attr['Name']} ({attr['Price']} RSD)")
 
     with tab_raw:
         st.dataframe(df_p[["Product_Name", "Section", "Price", "External_ID"]], hide_index=True)
