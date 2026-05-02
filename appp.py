@@ -6,10 +6,9 @@ import zipfile
 import re
 import uuid
 
-# 1. Konfiguracija stranice
+# 1. Konfiguracija
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
 
-# CSS za sitniji prikaz i zbijene elemente
 st.markdown("""
     <style>
     .stExpander { border: none !important; margin-bottom: -10px !important; }
@@ -19,6 +18,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🍔 Wolt Menu Scraper")
+st.info("Popravljeno: Dubinsko skeniranje veza između jela i priloga za Glovo.")
 
 # --- POMOĆNE FUNKCIJE ---
 def get_slug(url):
@@ -37,27 +37,32 @@ def fetch_data(slug):
     except: return None
 
 def process_all_data(data):
+    # 1. Kategorije
     item_to_section = {}
     for cat in data.get("categories", []):
         cat_name = cat.get("name", "Meni")
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
+    # 2. MAPIRANJE GRUPA I ATRIBUTA (Pravimo "rečnik" veza)
     wolt_group_to_new_id = {}
     groups_raw, attributes_raw = [], []
     
+    # Prvo izvučemo sve grupe koje postoje u restoranu
     for group in data.get("options", []):
         w_gid = group.get("id")
         new_gid = str(uuid.uuid4())
-        wolt_group_to_new_id[w_gid] = new_gid
+        wolt_group_to_new_id[w_gid] = new_gid # Pamtimo: Wolt ID -> Novi UUID
         
+        g_name = group.get("name", "Prilog")
         current_group_attr_ids = []
+        
         for val in group.get("values", []):
             new_aid = str(uuid.uuid4())
             current_group_attr_ids.append(new_aid)
             attributes_raw.append({
                 "External_ID": new_aid,
-                "Group_ID_Internal": new_gid, # Za lakšu pretragu u UI
+                "Group_ID_Internal": new_gid,
                 "Name": val.get("name", ""),
                 "Price": val.get("price", 0) / 100,
                 "Enabled": "YES",
@@ -66,7 +71,7 @@ def process_all_data(data):
             
         groups_raw.append({
             "External_ID": new_gid,
-            "Name": group.get("name", "Prilog"),
+            "Name": g_name,
             "Max": 10, "Min": 0,
             "Multiple_Selection": "NO",
             "Collapse_by_Default": "NO",
@@ -76,6 +81,7 @@ def process_all_data(data):
     df_groups = pd.DataFrame(groups_raw)
     df_attributes = pd.DataFrame(attributes_raw)
 
+    # 3. OBRADA ARTIKALA (Spajanje)
     items_list, seen_ids = [], set()
     for item in data.get("items", []):
         w_iid = item.get("id")
@@ -83,12 +89,25 @@ def process_all_data(data):
         seen_ids.add(w_iid)
         
         new_iid = str(uuid.uuid4())
+        
+        # Skupljamo ID-jeve grupa za ovaj artikal
+        connected_new_gids = []
+        
+        # Wolt krije opcije u 'options' ili 'selection_groups'
+        wolt_opts = item.get("options", []) + item.get("selection_groups", [])
+        
+        for opt in wolt_opts:
+            # Tražimo ID grupe (proveravamo tri različita ključa)
+            target_w_gid = opt.get("option_id") or opt.get("id") or opt.get("selection_group_id")
+            
+            if target_w_gid in wolt_group_to_new_id:
+                connected_new_gids.append(wolt_group_to_new_id[target_w_gid])
+
+        # Slika
         img_url = ""
         main_img = item.get("main_image")
         if isinstance(main_img, dict) and main_img.get("id"):
             img_url = f"https://imageproxy.wolt.com/assets/{main_img.get('id')}?w=960"
-
-        connected_gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
 
         items_list.append({
             "External_ID": new_iid,
@@ -98,7 +117,7 @@ def process_all_data(data):
             "Price": int((item.get("price") or item.get("base_price") or 0) / 100),
             "Image_1": img_url,
             "Description": item.get("description", "").replace("\n", " ").strip(),
-            "Attribute_Groups": ",".join(connected_gids),
+            "Attribute_Groups": ",".join(list(set(connected_new_gids))), # set() uklanja duplikate
             "Is_Alcoholic": "NO", "Is_Tobacco": "NO", "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
         })
     
@@ -106,17 +125,18 @@ def process_all_data(data):
     return df_products, df_groups, df_attributes
 
 # --- UI ---
-link_input = st.text_input("Nalepi Wolt link:")
+link_input = st.text_input("Nalepi link restorana:")
 
 if st.button("🚀 POKRENI"):
     if link_input:
-        with st.spinner("Sakupljam podatke..."):
+        with st.spinner("Povezujem jela i priloge..."):
             slug = get_slug(link_input)
             raw = fetch_data(slug)
             if raw:
-                st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = process_all_data(raw)
+                p, g, a = process_all_data(raw)
+                st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
                 st.session_state['slug'] = slug
-                st.success("Uspešno učitano!")
+                st.success("Sistem je uspešno povezao sve relacije!")
 
 if 'df_p' in st.session_state:
     df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
@@ -125,7 +145,7 @@ if 'df_p' in st.session_state:
     c1, c2, _ = st.columns([0.15, 0.2, 0.65])
     with c1:
         df_excel = df_p.copy()
-        df_excel['Image_1'] = "" # Čist Excel za Glovo
+        df_excel['Image_1'] = "" 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_excel.to_excel(writer, index=False, sheet_name='Products')
@@ -148,22 +168,21 @@ if 'df_p' in st.session_state:
     tab_raw, tab_tree = st.tabs(["📊 TABELE", "🔍 HIJERARHIJA"])
 
     with tab_raw:
-        st.dataframe(df_p[["Product_Name", "Section", "Price", "External_ID"]], hide_index=True)
+        st.dataframe(df_p[["Product_Name", "Section", "Price", "Attribute_Groups"]], hide_index=True)
 
     with tab_tree:
         for section in df_p['Section'].unique():
             st.markdown(f"**{section}**")
             for _, prod in df_p[df_p['Section'] == section].iterrows():
-                # Jelo
                 with st.expander(f"{prod['Product_Name']} ({prod['Price']} RSD)"):
                     g_ids = [gid for gid in str(prod['Attribute_Groups']).split(",") if gid]
-                    for gid in g_ids:
-                        g_info = df_g[df_g['External_ID'] == gid]
-                        if not g_info.empty:
-                            # Grupa
-                            with st.expander(f"└ {g_info.iloc[0]['Name']}"):
-                                # Atributi - DODATO: Vraćene cene priloga u UI
-                                rel_attrs = df_a[df_a['Group_ID_Internal'] == gid]
-                                for _, attr in rel_attrs.iterrows():
-                                    price_txt = f"+{attr['Price']} RSD" if attr['Price'] > 0 else "Gratis"
-                                    st.write(f"• {attr['Name']} ({price_txt})")
+                    if g_ids:
+                        for gid in g_ids:
+                            g_info = df_g[df_g['External_ID'] == gid]
+                            if not g_info.empty:
+                                with st.expander(f"└ {g_info.iloc[0]['Name']}"):
+                                    rel_attrs = df_a[df_a['Group_ID_Internal'] == gid]
+                                    for _, attr in rel_attrs.iterrows():
+                                        st.write(f"• {attr['Name']} ({attr['Price']} RSD)")
+                    else:
+                        st.write("Nema priloga.")
