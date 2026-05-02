@@ -4,13 +4,20 @@ import pandas as pd
 import io
 import zipfile
 import re
-import uuid
 
-# 1. Konfiguracija
+# 1. Konfiguracija stranice
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
 
+st.markdown("""
+    <style>
+    .stExpander { border: none !important; margin-bottom: -10px !important; }
+    .stExpander [data-testid="stExpanderDetails"] { padding-top: 0px !important; padding-left: 25px !important; }
+    .stMarkdown p { font-size: 14px !important; margin-bottom: 2px !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
 st.title("🍔 Wolt Menu Scraper")
-st.markdown("Popravljene relacije: Sada Glovo mora da 'vidi' vezu između jela i priloga.")
+st.info("Logika ID-jeva: Proizvodi (A), Grupe (G), Atributi (V) - Baš kao u tvom primeru.")
 
 # --- POMOĆNE FUNKCIJE ---
 def get_slug(url):
@@ -36,114 +43,122 @@ def process_all_data(data):
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
-    # 2. GENERISANJE UUID-jeva
-    wolt_group_to_uuid = {}
+    # 2. GENERISANJE ID-jeva PREMA GASTRO LOGICI (A, G, V)
+    wolt_group_to_new_id = {}
+    wolt_attr_to_new_id = {}
     
-    groups_raw, attributes_raw = [], []
+    groups_raw = []
+    attributes_raw = []
     
-    # Prvo obrađujemo grupe i njihove atribute
+    # Brojači
+    g_count = 1
+    v_count = 1
+    
+    # Obrada grupa i atributa
     for group in data.get("options", []):
         w_gid = group.get("id")
-        new_gid = str(uuid.uuid4())
-        wolt_group_to_uuid[w_gid] = new_gid
+        new_gid = f"G{g_count}" # G1, G2, G3...
+        wolt_group_to_new_id[w_gid] = new_gid
+        g_count += 1
         
-        g_name = group.get("name", "Prilog")
-        
-        current_group_new_aids = []
+        current_group_v_ids = []
         for val in group.get("values", []):
-            new_aid = str(uuid.uuid4())
-            current_group_new_aids.append(new_aid)
+            w_aid = val.get("id")
+            new_vid = f"V{v_count}" # V1, V2, V3...
+            wolt_attr_to_new_id[w_aid] = new_vid
+            current_group_v_ids.append(new_vid)
+            v_count += 1
             
             attributes_raw.append({
-                "External_ID": new_aid,
+                "External_ID": new_vid,
+                "Group_ID_Internal": new_gid,
                 "Name": val.get("name", ""),
                 "Price": val.get("price", 0) / 100,
                 "Enabled": "YES",
                 "Selected_by_Default": "NO"
             })
             
-        # FIX: Koristimo samo zarez BEZ RAZMAKA (",") za listu atributa
         groups_raw.append({
             "External_ID": new_gid,
-            "Name": g_name,
             "Max": 10, "Min": 0,
+            "Name": group.get("name", "Prilog"),
             "Multiple_Selection": "NO",
             "Collapse_by_Default": "NO",
-            "Attributes": ",".join(current_group_new_aids) 
+            "Attributes": ",".join(current_group_attr_ids if 'current_group_attr_ids' in locals() else current_group_v_ids)
         })
 
-    df_groups_final = pd.DataFrame(groups_raw)
-    df_attributes_export = pd.DataFrame(attributes_raw)
+    df_groups = pd.DataFrame(groups_raw)
+    df_attributes = pd.DataFrame(attributes_raw)
 
-    # 3. Obrada artikala
+    # 3. OBRADA ARTIKALA (A1, A2, A3...)
     items_list, seen_ids = [], set()
+    a_count = 1
+    
     for item in data.get("items", []):
         w_iid = item.get("id")
         if not w_iid or w_iid in seen_ids: continue
         seen_ids.add(w_iid)
         
-        new_iid = str(uuid.uuid4())
+        new_aid = f"A{a_count}" # A1, A2, A3...
+        a_count += 1
+        
+        # Povezivanje grupa
+        connected_gids = []
+        wolt_opts = item.get("options", []) + item.get("selection_groups", [])
+        for opt in wolt_opts:
+            target_w_gid = opt.get("option_id") or opt.get("id") or opt.get("selection_group_id")
+            if target_w_gid in wolt_group_to_new_id:
+                connected_gids.append(wolt_group_to_new_id[target_w_gid])
 
-        image_url = ""
+        # Slika
+        img_url = ""
         main_img = item.get("main_image")
         if isinstance(main_img, dict) and main_img.get("id"):
-            image_url = f"https://imageproxy.wolt.com/assets/{main_img.get('id')}?w=960"
-        elif item.get("images") and len(item.get("images")) > 0:
-            image_url = item.get("images")[0].get("url", "")
+            img_url = f"https://imageproxy.wolt.com/assets/{main_img.get('id')}?w=960"
 
-        # Povezivanje na NOVE ID-jeve grupa
-        item_opts = item.get("options", [])
-        connected_new_gids = []
-        for opt_entry in item_opts:
-            w_target_id = opt_entry.get("option_id")
-            if w_target_id in wolt_group_to_uuid:
-                connected_new_gids.append(wolt_group_to_uuid[w_target_id])
-
-        # FIX: Koristimo samo zarez BEZ RAZMAKA (",") za listu grupa
         items_list.append({
-            "External_ID": new_iid,
+            "External_ID": new_aid,
             "Product_Name": item.get("name", ""),
             "Collection": "MENI",
             "Section": item_to_section.get(w_iid, "Ostalo"),
             "Price": int((item.get("price") or item.get("base_price") or 0) / 100),
-            "Image_1": image_url,
+            "Image_1": img_url,
             "Description": item.get("description", "").replace("\n", " ").strip(),
-            "Attribute_Groups": ",".join(connected_new_gids),
+            "Attribute_Groups": ",".join(list(set(connected_gids))),
             "Is_Alcoholic": "NO", "Is_Tobacco": "NO", "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
         })
     
     df_products = pd.DataFrame(items_list).sort_values(by=["Section", "Product_Name"])
-    return df_products, df_groups_final, df_attributes_export
+    return df_products, df_groups, df_attributes
 
 # --- UI ---
-link_input = st.text_input("Nalepi Wolt link:")
+link_input = st.text_input("Nalepi link restorana:")
 
 if st.button("🚀 POKRENI"):
     if link_input:
-        with st.spinner("Generišem čiste relacije..."):
+        with st.spinner("Generišem Gastro logiku ID-jeva..."):
             slug = get_slug(link_input)
             raw = fetch_data(slug)
             if raw:
-                st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = process_all_data(raw)
+                p, g, a = process_all_data(raw)
+                st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
                 st.session_state['slug'] = slug
-                st.success("Spremno! Relacije su sada očišćene od razmaka.")
+                st.success("Uspešno! ID-jevi su sada A, G i V.")
 
 if 'df_p' in st.session_state:
     df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
 
-    # --- DOWNLOAD ---
     st.markdown("### 📥 Download")
-    c1, c2, _ = st.columns([1, 1.2, 4])
+    c1, c2, _ = st.columns([0.15, 0.2, 0.65])
     with c1:
         df_excel = df_p.copy()
-        df_excel['Image_1'] = ""
+        df_excel['Image_1'] = "" 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_excel.to_excel(writer, index=False, sheet_name='Products')
             df_g.to_excel(writer, index=False, sheet_name='Attribute Groups')
-            df_a.to_excel(writer, index=False, sheet_name='Attributes')
-        st.download_button("📊 GLOVO EXCEL", output.getvalue(), f"Glovo_Import_{slug}.xlsx")
-    
+            df_a.drop(columns=['Group_ID_Internal']).to_excel(writer, index=False, sheet_name='Attributes')
+        st.download_button("📊 EXCEL", output.getvalue(), f"Glovo_{slug}.xlsx")
     with c2:
         if st.button("🖼️ PRIPREMI SLIKE"):
             img_df = df_p[df_p['Image_1'] != ""]
@@ -157,29 +172,26 @@ if 'df_p' in st.session_state:
             st.download_button("🔥 SKINI ZIP", zip_io.getvalue(), f"Slike_{slug}.zip")
 
     st.markdown("---")
-    # TABOVI
     t1, t2 = st.tabs(["📊 TABELE", "🔍 HIJERARHIJA"])
 
     with t1:
-        st.write("**Products**")
-        st.dataframe(df_p[["Product_Name", "Section", "Price", "Attribute_Groups"]], hide_index=True)
-        st.write("**Attribute Groups**")
+        st.write("**Products (External_ID: A1, A2...)**")
+        st.dataframe(df_p[["External_ID", "Product_Name", "Section", "Attribute_Groups"]], hide_index=True)
+        st.write("**Attribute Groups (External_ID: G1, G2...)**")
         st.dataframe(df_g, hide_index=True)
+        st.write("**Attributes (External_ID: V1, V2...)**")
+        st.dataframe(df_a, hide_index=True)
 
     with t2:
-        # Prikaz stabla (kao provera veze)
         for section in df_p['Section'].unique():
             st.markdown(f"**{section}**")
             for _, prod in df_p[df_p['Section'] == section].iterrows():
-                with st.expander(f"{prod['Product_Name']} ({prod['Price']} RSD)"):
-                    # Ovde proveravamo da li skripta unutar sebe vidi vezu
+                with st.expander(f"{prod['Product_Name']} ({prod['External_ID']})"):
                     g_ids = [gid for gid in str(prod['Attribute_Groups']).split(",") if gid]
                     for gid in g_ids:
                         g_info = df_g[df_g['External_ID'] == gid]
                         if not g_info.empty:
-                            with st.expander(f"└ {g_info.iloc[0]['Name']}"):
-                                a_ids = [aid for aid in str(g_info.iloc[0]['Attributes']).split(",") if aid]
-                                for aid in a_ids:
-                                    a_info = df_a[df_a['External_ID'] == aid]
-                                    if not a_info.empty:
-                                        st.write(f"• {a_info.iloc[0]['Name']}")
+                            with st.expander(f"└ {g_info.iloc[0]['Name']} ({gid})"):
+                                rel_attrs = df_a[df_a['Group_ID_Internal'] == gid]
+                                for _, attr in rel_attrs.iterrows():
+                                    st.write(f"• {attr['Name']} ({attr['External_ID']})")
