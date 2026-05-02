@@ -4,6 +4,7 @@ import pandas as pd
 import io
 import zipfile
 import re
+import uuid # Generator za "eace0db4-cfeb-49f6-92ed-d076e0056c8b" format
 
 # 1. Konfiguracija stranice
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
@@ -17,7 +18,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🍔 Wolt Menu Scraper")
-st.info("Logika ID-jeva: Proizvodi (A), Grupe (G), Atributi (V) - Baš kao u tvom primeru.")
+st.info("Generišem ID-jeve u formatu koji si dobio na Glovo portalu (UUID).")
 
 # --- POMOĆNE FUNKCIJE ---
 def get_slug(url):
@@ -36,42 +37,32 @@ def fetch_data(slug):
     except: return None
 
 def process_all_data(data):
-    # 1. Mapiranje kategorija
+    # 1. Kategorije
     item_to_section = {}
     for cat in data.get("categories", []):
         cat_name = cat.get("name", "Meni")
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
-    # 2. GENERISANJE ID-jeva PREMA GASTRO LOGICI (A, G, V)
+    # 2. GENERISANJE UUID-jeva (External_ID format koji Glovo traži)
     wolt_group_to_new_id = {}
-    wolt_attr_to_new_id = {}
+    groups_raw, attributes_raw = [], []
     
-    groups_raw = []
-    attributes_raw = []
-    
-    # Brojači
-    g_count = 1
-    v_count = 1
-    
-    # Obrada grupa i atributa
     for group in data.get("options", []):
         w_gid = group.get("id")
-        new_gid = f"G{g_count}" # G1, G2, G3...
+        new_gid = str(uuid.uuid4()) # Format: eace0db4-cfeb-49f6-92ed-d076e0056c8b
         wolt_group_to_new_id[w_gid] = new_gid
-        g_count += 1
         
-        current_group_v_ids = []
+        g_name = group.get("name", "Prilog")
+        current_group_attr_ids = []
+        
         for val in group.get("values", []):
-            w_aid = val.get("id")
-            new_vid = f"V{v_count}" # V1, V2, V3...
-            wolt_attr_to_new_id[w_aid] = new_vid
-            current_group_v_ids.append(new_vid)
-            v_count += 1
+            new_aid = str(uuid.uuid4())
+            current_group_attr_ids.append(new_aid)
             
             attributes_raw.append({
-                "External_ID": new_vid,
-                "Group_ID_Internal": new_gid,
+                "External_ID": new_aid,
+                "Group_ID_Internal": new_gid, # Za UI prikaz
                 "Name": val.get("name", ""),
                 "Price": val.get("price", 0) / 100,
                 "Enabled": "YES",
@@ -81,28 +72,25 @@ def process_all_data(data):
         groups_raw.append({
             "External_ID": new_gid,
             "Max": 10, "Min": 0,
-            "Name": group.get("name", "Prilog"),
+            "Name": g_name,
             "Multiple_Selection": "NO",
             "Collapse_by_Default": "NO",
-            "Attributes": ",".join(current_group_attr_ids if 'current_group_attr_ids' in locals() else current_group_v_ids)
+            "Attributes": ",".join(current_group_attr_ids) # Čist zarez bez razmaka
         })
 
     df_groups = pd.DataFrame(groups_raw)
     df_attributes = pd.DataFrame(attributes_raw)
 
-    # 3. OBRADA ARTIKALA (A1, A2, A3...)
+    # 3. OBRADA ARTIKALA (UUID-jevi)
     items_list, seen_ids = [], set()
-    a_count = 1
-    
     for item in data.get("items", []):
         w_iid = item.get("id")
         if not w_iid or w_iid in seen_ids: continue
         seen_ids.add(w_iid)
         
-        new_aid = f"A{a_count}" # A1, A2, A3...
-        a_count += 1
+        new_iid = str(uuid.uuid4())
         
-        # Povezivanje grupa
+        # Povezivanje na NOVE UUID-jeve grupa
         connected_gids = []
         wolt_opts = item.get("options", []) + item.get("selection_groups", [])
         for opt in wolt_opts:
@@ -117,14 +105,14 @@ def process_all_data(data):
             img_url = f"https://imageproxy.wolt.com/assets/{main_img.get('id')}?w=960"
 
         items_list.append({
-            "External_ID": new_aid,
+            "External_ID": new_iid,
             "Product_Name": item.get("name", ""),
             "Collection": "MENI",
             "Section": item_to_section.get(w_iid, "Ostalo"),
             "Price": int((item.get("price") or item.get("base_price") or 0) / 100),
             "Image_1": img_url,
             "Description": item.get("description", "").replace("\n", " ").strip(),
-            "Attribute_Groups": ",".join(list(set(connected_gids))),
+            "Attribute_Groups": ",".join(list(set(connected_gids))), # Čist zarez bez razmaka
             "Is_Alcoholic": "NO", "Is_Tobacco": "NO", "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
         })
     
@@ -136,14 +124,14 @@ link_input = st.text_input("Nalepi link restorana:")
 
 if st.button("🚀 POKRENI"):
     if link_input:
-        with st.spinner("Generišem Gastro logiku ID-jeva..."):
+        with st.spinner("Generišem Glovo UUID-jeve..."):
             slug = get_slug(link_input)
             raw = fetch_data(slug)
             if raw:
                 p, g, a = process_all_data(raw)
                 st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
                 st.session_state['slug'] = slug
-                st.success("Uspešno! ID-jevi su sada A, G i V.")
+                st.success("Spremno! Svi ID-jevi su u formatu koji Glovo traži.")
 
 if 'df_p' in st.session_state:
     df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
@@ -175,23 +163,19 @@ if 'df_p' in st.session_state:
     t1, t2 = st.tabs(["📊 TABELE", "🔍 HIJERARHIJA"])
 
     with t1:
-        st.write("**Products (External_ID: A1, A2...)**")
+        st.write("**Products (External_ID: UUID format)**")
         st.dataframe(df_p[["External_ID", "Product_Name", "Section", "Attribute_Groups"]], hide_index=True)
-        st.write("**Attribute Groups (External_ID: G1, G2...)**")
-        st.dataframe(df_g, hide_index=True)
-        st.write("**Attributes (External_ID: V1, V2...)**")
-        st.dataframe(df_a, hide_index=True)
 
     with t2:
         for section in df_p['Section'].unique():
             st.markdown(f"**{section}**")
             for _, prod in df_p[df_p['Section'] == section].iterrows():
-                with st.expander(f"{prod['Product_Name']} ({prod['External_ID']})"):
+                with st.expander(f"{prod['Product_Name']} ({prod['External_ID'][:8]}...)"):
                     g_ids = [gid for gid in str(prod['Attribute_Groups']).split(",") if gid]
                     for gid in g_ids:
                         g_info = df_g[df_g['External_ID'] == gid]
                         if not g_info.empty:
-                            with st.expander(f"└ {g_info.iloc[0]['Name']} ({gid})"):
+                            with st.expander(f"└ {g_info.iloc[0]['Name']}"):
                                 rel_attrs = df_a[df_a['Group_ID_Internal'] == gid]
                                 for _, attr in rel_attrs.iterrows():
-                                    st.write(f"• {attr['Name']} ({attr['External_ID']})")
+                                    st.write(f"• {attr['Name']} (+{attr['Price']} RSD)")
