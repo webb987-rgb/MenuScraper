@@ -9,7 +9,7 @@ import uuid
 # 1. Konfiguracija stranice
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
 
-# CSS za zbijanje elemenata i lepši prikaz
+# CSS za zbijanje elemenata
 st.markdown("""
     <style>
     .stExpander { border: none !important; margin-bottom: -10px !important; }
@@ -20,7 +20,6 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🍔 Wolt Menu Scraper")
-st.markdown("Fokusirano na Glovo import i Menu pregled (bez PDF-a).")
 
 # --- POMOĆNE FUNKCIJE ---
 def fetch_data(slug):
@@ -79,8 +78,19 @@ def process_all_data(data):
         seen_ids.add(w_id)
         
         new_iid = str(uuid.uuid4())
-        img = item.get("main_image", {}).get("id", "")
-        img_url = f"https://imageproxy.wolt.com/assets/{img}?w=960" if img else ""
+        
+        # LOGIKA CENE: Puna cena (base_price)
+        puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
+
+        # SLIKE: Hvatanje URL-a
+        img_id = ""
+        main_img = item.get("main_image")
+        if isinstance(main_img, dict) and main_img.get("id"):
+            img_id = main_img.get("id")
+        elif item.get("images") and len(item.get("images")) > 0:
+            img_id = item.get("images")[0].get("id", "")
+        
+        img_url = f"https://imageproxy.wolt.com/assets/{img_id}?w=960" if img_id else ""
         
         # Povezivanje grupa
         gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
@@ -90,7 +100,7 @@ def process_all_data(data):
             "Product_Name": item.get("name", ""),
             "Collection": "MENI",
             "Section": item_to_section.get(w_id, "Ostalo"),
-            "Price": int((item.get("price") or item.get("base_price") or 0) / 100),
+            "Price": puna_cena,
             "Image_1": img_url,
             "Description": item.get("description", "").replace("\n", " ").strip(),
             "Attribute_Groups": ",".join(gids),
@@ -109,32 +119,40 @@ if st.button("🚀 POKRENI"):
         if raw:
             st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = process_all_data(raw)
             st.session_state['slug'] = slug
-            st.success("Podaci uspešno učitani!")
+            st.success("Podaci učitani! Slike i linkovi su spremni.")
 
 if 'df_p' in st.session_state:
     df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
 
     st.markdown("### 📥 Download")
-    col_ex, col_zip, _ = st.columns([1, 1, 4])
+    col_ex, col_zip, _ = st.columns([1, 1.2, 4])
     
     with col_ex:
+        # Excel za Glovo (bez linkova unutar fajla)
+        df_excel = df_p.copy()
+        df_excel['Image_1'] = ""
         out = io.BytesIO()
         with pd.ExcelWriter(out, engine='openpyxl') as w:
-            df_p.assign(Image_1="").to_excel(w, index=False, sheet_name='Products')
+            df_excel.to_excel(w, index=False, sheet_name='Products')
             df_g.to_excel(w, index=False, sheet_name='Attribute Groups')
             df_a.drop(columns=['Group_ID_Internal']).to_excel(w, index=False, sheet_name='Attributes')
         st.download_button("📊 EXCEL", out.getvalue(), f"Glovo_{slug}.xlsx")
         
     with col_zip:
-        if st.button("🖼️ ZIP SLIKE"):
-            z_io = io.BytesIO()
-            with zipfile.ZipFile(z_io, "w") as zf:
-                for _, r in df_p[df_p['Image_1'] != ""].iterrows():
-                    try:
-                        name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
-                        zf.writestr(f"{name}.jpg", requests.get(r['Image_1']).content)
-                    except: continue
-            st.download_button("🔥 SKINI ZIP", z_io.getvalue(), f"Slike_{slug}.zip")
+        # ZIP funkcija (ponovo povezana sa linkovima u memoriji)
+        img_df = df_p[df_p['Image_1'] != ""]
+        if not img_df.empty:
+            if st.button("🖼️ PRIPREMI ZIP"):
+                z_io = io.BytesIO()
+                with zipfile.ZipFile(z_io, "w") as zf:
+                    for _, r in img_df.iterrows():
+                        try:
+                            # Čistimo ime fajla od čudnih karaktera
+                            clean_name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
+                            img_res = requests.get(r['Image_1'], timeout=10)
+                            zf.writestr(f"{clean_name}.jpg", img_res.content)
+                        except: continue
+                st.download_button("🔥 SKINI ZIP", z_io.getvalue(), f"Slike_{slug}.zip")
 
     st.markdown("---")
     t_menu, t_raw = st.tabs(["🌳 MENU", "📊 SIROVI PODACI"])
@@ -145,7 +163,7 @@ if 'df_p' in st.session_state:
             for _, p in df_p[df_p['Section'] == s].iterrows():
                 with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                     if p['Description']: st.write(f"_{p['Description']}_")
-                    g_ids = [g for g in p['Attribute_Groups'].split(",") if g]
+                    g_ids = [g for g in str(p['Attribute_Groups']).split(",") if g]
                     for gid in g_ids:
                         g_info = df_g[df_g['External_ID'] == gid]
                         if not g_info.empty:
@@ -154,4 +172,11 @@ if 'df_p' in st.session_state:
                                     st.write(f"• {a['Name']} ({a['Price']} RSD)")
                                     
     with t_raw:
-        st.dataframe(df_p[["Product_Name", "Section", "Price", "External_ID"]], hide_index=True)
+        st.info("💡 Ovde možeš kliknuti na link da proveriš sliku pre nego što skineš ZIP.")
+        st.dataframe(
+            df_p[["Product_Name", "Section", "Price", "Image_1", "External_ID"]], 
+            hide_index=True,
+            column_config={
+                "Image_1": st.column_config.LinkColumn("Proveri Sliku", display_text="Vidi 🔗")
+            }
+        )
