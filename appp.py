@@ -9,10 +9,13 @@ import uuid
 # 1. Konfiguracija stranice
 st.set_page_config(page_title="Wolt Scraper", page_icon="🍔", layout="wide")
 
+# CSS za zbijanje elemenata
 st.markdown("""
     <style>
     .stExpander { border: none !important; margin-bottom: -10px !important; }
+    .stExpander [data-testid="stExpanderDetails"] { padding-top: 0px !important; padding-left: 25px !important; }
     .stMarkdown p { font-size: 14px !important; margin-bottom: 2px !important; }
+    [data-testid="column"] { width: fit-content !important; min-width: fit-content !important; flex: none !important; padding-right: 15px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -21,25 +24,26 @@ st.title("🍔 Wolt Menu Scraper")
 # --- POMOĆNE FUNKCIJE ---
 def fetch_data(slug):
     api_url = f"https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/{slug}/assortment"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "sr-RS,sr;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(api_url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            return r.json()
-        return None
+        return r.json() if r.status_code == 200 else None
     except:
         return None
 
 def process_all_data(data):
+    # 1. Mapiranje kategorija SA ZADRŽAVANJEM REDOSLEDA
+    # Pravimo listu kategorija u redosledu kako dolaze iz API-ja
+    ordered_sections = []
     item_to_section = {}
+    
     for cat in data.get("categories", []):
         cat_name = cat.get("name", "Meni")
+        ordered_sections.append(cat_name)
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
+    # 2. Atributi i Grupe (UUID logika)
     wolt_group_to_new_id = {}
     groups_raw, attrs_raw = [], []
     
@@ -60,86 +64,119 @@ def process_all_data(data):
             "Multiple_Selection": "NO", "Collapse_by_Default": "NO", "Attributes": ",".join(a_ids)
         })
 
+    # 3. Proizvodi - ZADRŽAVANJE REDOSLEDA JELA
+    # API obično vraća listu 'items' u redosledu u kom su u bazi
     items_list = []
     seen_ids = set()
-    for item in data.get("items", []):
-        w_id = item.get("id")
-        if not w_id or w_id in seen_ids: continue
-        seen_ids.add(w_id)
-        
-        # LOGIKA ZA SLIKU - Proveravamo više lokacija
-        img_id = ""
-        if item.get("main_image"):
-            img_id = item.get("main_image", {}).get("id", "")
-        elif item.get("images") and len(item.get("images")) > 0:
-            img_id = item.get("images")[0].get("id", "")
-        
-        img_url = f"https://imageproxy.wolt.com/assets/{img_id}?w=1200" if img_id else ""
-        
-        puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
-        gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
-
-        items_list.append({
-            "External_ID": str(uuid.uuid4()),
-            "Product_Name": item.get("name", ""),
-            "Collection": "MENI",
-            "Section": item_to_section.get(w_id, "Ostalo"),
-            "Price": puna_cena,
-            "Image_1": img_url,
-            "Description": item.get("description", "").replace("\n", " ").strip(),
-            "Attribute_Groups": ",".join(gids),
-            "Is_Alcoholic": "NO", "Is_Tobacco": "NO", "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
-        })
     
-    return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw)
+    # Da bismo zadržali redosled jela onako kako su u kategorijama, idemo kroz kategorije
+    for cat in data.get("categories", []):
+        cat_name = cat.get("name", "Meni")
+        category_item_ids = cat.get("item_ids", [])
+        
+        # Pronalazimo item objekte za ove ID-jeve
+        for w_id in category_item_ids:
+            if w_id in seen_ids: continue
+            
+            # Nađi item u listi svih items
+            item = next((i for i in data.get("items", []) if i.get("id") == w_id), None)
+            if not item: continue
+            
+            seen_ids.add(w_id)
+            new_iid = str(uuid.uuid4())
+            puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
+
+            # HVATANJE SLIKE (Kompletna logika)
+            img_url = ""
+            main_img = item.get("main_image")
+            if isinstance(main_img, dict) and main_img.get("id"):
+                img_url = f"https://imageproxy.wolt.com/assets/{main_img['id']}?w=960"
+            elif item.get("images") and len(item.get("images")) > 0:
+                first_img = item['images'][0]
+                if isinstance(first_img, dict):
+                    img_id = first_img.get('id')
+                    if img_id: img_url = f"https://imageproxy.wolt.com/assets/{img_id}?w=960"
+                    elif first_img.get('url'): img_url = first_img.get('url')
+
+            # Grupe
+            gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
+
+            items_list.append({
+                "External_ID": new_iid, "Product_Name": item.get("name", ""), "Collection": "MENI",
+                "Section": cat_name, "Price": puna_cena, "Image_1": img_url,
+                "Description": item.get("description", "").replace("\n", " ").strip(),
+                "Attribute_Groups": ",".join(gids), "Is_Alcoholic": "NO", "Is_Tobacco": "NO", 
+                "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
+            })
+        
+    return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
 # --- UI LOGIKA ---
-link_input = st.text_input("Nalepi Wolt link restorana:")
+link_input = st.text_input("Nalepi link restorana:")
 
 if st.button("🚀 POKRENI"):
     if link_input:
-        slug = link_input.strip().split('?')[0].rstrip('/').split('/')[-1]
+        slug = link_input.strip().rstrip('/').split('/')[-1]
         raw = fetch_data(slug)
         if raw:
-            st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = process_all_data(raw)
+            p, g, a, o_s = process_all_data(raw)
+            st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
+            st.session_state['ordered_sections'] = o_s
             st.session_state['slug'] = slug
-            st.success("Podaci povučeni!")
+            st.success("Podaci učitani po Wolt redosledu!")
 
 if 'df_p' in st.session_state:
-    df_p, df_g, df_a, slug = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug']
+    df_p, df_g, df_a, slug, ordered_sections = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug'], st.session_state['ordered_sections']
 
     st.markdown("### 📥 Download")
-    col1, col2 = st.columns(2)
+    col_ex, col_zip, _ = st.columns([1, 1.2, 4])
     
-    with col1:
+    with col_ex:
+        df_excel = df_p.copy()
+        df_excel['Image_1'] = "" 
         out = io.BytesIO()
         with pd.ExcelWriter(out, engine='openpyxl') as w:
-            df_p.to_excel(w, index=False, sheet_name='Products')
+            df_excel.to_excel(w, index=False, sheet_name='Products')
             df_g.to_excel(w, index=False, sheet_name='Attribute Groups')
-            df_a.drop(columns=['Group_ID_Internal'], errors='ignore').to_excel(w, index=False, sheet_name='Attributes')
-        st.download_button("📊 EXCEL", out.getvalue(), f"Wolt_{slug}.xlsx")
-
-    with col2:
-        # Prikazujemo dugme za pripremu samo ako ima slika
-        has_images = df_p[df_p['Image_1'] != ""].shape[0] > 0
-        if has_images:
-            if st.button(f"🖼️ ZIPUJ {df_p[df_p['Image_1'] != ''].shape[0]} SLIKA"):
+            df_a.drop(columns=['Group_ID_Internal']).to_excel(w, index=False, sheet_name='Attributes')
+        st.download_button("📊 EXCEL", out.getvalue(), f"Glovo_{slug}.xlsx")
+        
+    with col_zip:
+        img_df = df_p[df_p['Image_1'] != ""]
+        if not img_df.empty:
+            if st.button("🖼️ PRIPREMI ZIP"):
                 z_io = io.BytesIO()
                 with zipfile.ZipFile(z_io, "w") as zf:
-                    progress_bar = st.progress(0)
-                    imgs_to_process = df_p[df_p['Image_1'] != ""]
-                    for i, (_, r) in enumerate(imgs_to_process.iterrows()):
+                    for _, r in img_df.iterrows():
                         try:
-                            # Čišćenje imena fajla
-                            name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
-                            # Preuzimanje slike sa timeout-om
-                            img_data = requests.get(r['Image_1'], timeout=10).content
-                            zf.writestr(f"{name}.jpg", img_data)
-                        except:
-                            continue
-                        progress_bar.progress((i + 1) / len(imgs_to_process))
+                            clean_name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
+                            res = requests.get(r['Image_1'], timeout=10)
+                            zf.writestr(f"{clean_name}.jpg", res.content)
+                        except: continue
                 st.download_button("🔥 SKINI ZIP", z_io.getvalue(), f"Slike_{slug}.zip")
-        else:
-            st.error("Nisu pronađeni linkovi do slika u API-ju.")
 
-    st.dataframe(df_p[["Product_Name", "Section", "Price", "Image_1"]])
+    st.markdown("---")
+    t_menu, t_raw = st.tabs(["🌳 MENU", "📊 SIROVI PODACI"])
+    
+    with t_menu:
+        # Prikazujemo po originalnom redosledu sekcija
+        for s in ordered_sections:
+            prods_in_section = df_p[df_p['Section'] == s]
+            if not prods_in_section.empty:
+                st.markdown(f"**{s}**")
+                for _, p in prods_in_section.iterrows():
+                    with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
+                        if p['Description']: st.write(f"_{p['Description']}_")
+                        for gid in [g for g in str(p['Attribute_Groups']).split(",") if g]:
+                            g_i = df_g[df_g['External_ID'] == gid]
+                            if not g_i.empty:
+                                with st.expander(f"└ {g_i.iloc[0]['Name']}"):
+                                    for _, a in df_a[df_a['Group_ID_Internal'] == gid].iterrows():
+                                        st.write(f"• {a['Name']} ({a['Price']} RSD)")
+                                    
+    with t_raw:
+        st.dataframe(
+            df_p[["Product_Name", "Section", "Price", "Image_1", "External_ID"]], 
+            hide_index=True,
+            column_config={"Image_1": st.column_config.LinkColumn("Slika", display_text="Vidi 🔗")}
+        )
