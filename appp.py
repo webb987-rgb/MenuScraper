@@ -138,7 +138,8 @@ if 'df_p' in st.session_state:
         with pd.ExcelWriter(out, engine='openpyxl') as w:
             df_excel.to_excel(w, index=False, sheet_name='Products')
             df_g.to_excel(w, index=False, sheet_name='Attribute Groups')
-            df_a.drop(columns=['Group_ID_Internal']).to_excel(w, index=False, sheet_name='Attributes')
+            # DODATA IZMENA OVDE (errors='ignore')
+            df_a.drop(columns=['Group_ID_Internal'], errors='ignore').to_excel(w, index=False, sheet_name='Attributes')
         st.download_button("📊 EXCEL", out.getvalue(), f"Glovo_{slug}.xlsx")
         
     with col_zip:
