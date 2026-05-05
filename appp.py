@@ -24,6 +24,21 @@ st.markdown("""
 st.title("🍔 Wolt Menu Scraper")
 
 # --- POMOĆNE FUNKCIJE ---
+
+def fetch_data(slug):
+    """Funkcija koja povlači podatke sa Wolt API-ja"""
+    url = f"https://restaurant-api.wolt.com/v1/pages/restaurant/{slug}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Greška: Wolt API je vratio status {response.status_code}. Proveri da li je link ispravan.")
+            return None
+    except Exception as e:
+        st.error(f"Greška pri konekciji: {e}")
+        return None
+
 def get_slug(url):
     return url.strip().rstrip('/').split('/')[-1]
 
@@ -36,7 +51,6 @@ def create_pdf(df):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     # Dodajemo podršku za naša slova (koristi standardni font, ali bez specifičnih karaktera ako nisu instalirani fontovi)
-    # Za punu podršku č,ć,š potreban je .ttf fajl, ovde koristimo standardni Arial-like
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(200, 10, txt="JELOVNIK", ln=True, align='C')
     pdf.ln(10)
@@ -140,7 +154,7 @@ if 'df_p' in st.session_state:
             df_excel.to_excel(writer, index=False, sheet_name='Products')
             df_g.to_excel(writer, index=False, sheet_name='Attribute Groups')
             df_a.drop(columns=['Group_ID_Internal']).to_excel(writer, index=False, sheet_name='Attributes')
-        st.download_button("📊 EXCEL", output.getvalue(), f"Glovo_{slug}.xlsx")
+        st.download_button("📊 EXCEL", output.getvalue(), f"Wolt_{slug}.xlsx")
     
     with c2:
         if st.button("🖼️ ZIP"):
