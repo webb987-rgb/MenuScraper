@@ -54,13 +54,20 @@ def process_all_data(data):
             new_aid = str(uuid.uuid4())
             a_ids.append(new_aid)
             attrs_raw.append({
-                "External_ID": new_aid, "Group_ID_Internal": new_gid,
-                "Name": val.get("name", ""), "Price": val.get("price", 0) / 100,
-                "Enabled": "YES", "Selected_by_Default": "NO"
+                "External_ID": new_aid, 
+                "Group_ID_Internal": new_gid,
+                "Name": val.get("name", ""), 
+                "Price": val.get("price", 0) / 100,
+                "Enabled": "YES", 
+                "Selected_by_Default": "NO"
             })
         groups_raw.append({
-            "External_ID": new_gid, "Max": 10, "Min": 0, "Name": group.get("name", "Prilog"),
-            "Multiple_Selection": "NO", "Collapse_by_Default": "NO", "Attributes": ",".join(a_ids)
+            "External_ID": new_gid, 
+            "Max": 10, "Min": 0, 
+            "Name": group.get("name", "Prilog"),
+            "Multiple_Selection": "NO", 
+            "Collapse_by_Default": "NO", 
+            "Attributes": ",".join(a_ids)
         })
 
     # 3. Proizvodi - ZADRŽAVANJE REDOSLEDA JELA
@@ -120,22 +127,36 @@ if st.button("🚀 POKRENI"):
             st.session_state['ordered_sections'] = o_s
             st.session_state['slug'] = slug
             st.success("Sveti Gral je spreman! Sve je učitano po Wolt redosledu.")
+        else:
+            st.error("Greška pri učitavanju podataka. Proveri link.")
 
 if 'df_p' in st.session_state:
-    df_p, df_g, df_a, slug, ordered_sections = st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['slug'], st.session_state['ordered_sections']
+    df_p = st.session_state['df_p']
+    df_g = st.session_state['df_g']
+    df_a = st.session_state['df_a']
+    slug = st.session_state['slug']
+    ordered_sections = st.session_state['ordered_sections']
 
     st.markdown("### 📥 Download")
     col_ex, col_zip, _ = st.columns([1, 1.2, 4])
     
     with col_ex:
+        # Priprema Excela
         df_excel = df_p.copy()
         df_excel['Image_1'] = "" 
         out = io.BytesIO()
         with pd.ExcelWriter(out, engine='openpyxl') as w:
             df_excel.to_excel(w, index=False, sheet_name='Products')
             df_g.to_excel(w, index=False, sheet_name='Attribute Groups')
-            df_a.drop(columns=['Group_ID_Internal']).to_excel(w, index=False, sheet_name='Attributes')
-        st.download_button("📊 EXCEL", out.getvalue(), f"Glovo_{slug}.xlsx")
+            
+            # Popravljen deo: Provera postojanja kolone pre brisanja
+            if not df_a.empty and 'Group_ID_Internal' in df_a.columns:
+                df_a_final = df_a.drop(columns=['Group_ID_Internal'])
+            else:
+                df_a_final = df_a
+            df_a_final.to_excel(w, index=False, sheet_name='Attributes')
+            
+        st.download_button("📊 EXCEL", out.getvalue(), f"Wolt_{slug}.xlsx")
         
     with col_zip:
         img_df = df_p[df_p['Image_1'] != ""]
@@ -162,12 +183,18 @@ if 'df_p' in st.session_state:
                 for _, p in prods_in_section.iterrows():
                     with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                         if p['Description']: st.write(f"_{p['Description']}_")
-                        for gid in [g for g in str(p['Attribute_Groups']).split(",") if g]:
-                            g_i = df_g[df_g['External_ID'] == gid]
-                            if not g_i.empty:
-                                with st.expander(f"└ {g_i.iloc[0]['Name']}"):
-                                    for _, a in df_a[df_a['Group_ID_Internal'] == gid].iterrows():
-                                        st.write(f"• {a['Name']} ({a['Price']} RSD)")
+                        
+                        # Prikaz dodataka (opcija)
+                        g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
+                        for gid in g_ids:
+                            if not df_g.empty:
+                                g_i = df_g[df_g['External_ID'] == gid]
+                                if not g_i.empty:
+                                    with st.expander(f"└ {g_i.iloc[0]['Name']}"):
+                                        if not df_a.empty:
+                                            attrs = df_a[df_a['Group_ID_Internal'] == gid]
+                                            for _, a in attrs.iterrows():
+                                                st.write(f"• {a['Name']} ({a['Price']} RSD)")
                                     
     with t_raw:
         st.dataframe(
