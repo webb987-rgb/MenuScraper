@@ -3,3 +3,4 @@ requests
 pandas
 openpyxl
 fpdf2
+curl_cffi
