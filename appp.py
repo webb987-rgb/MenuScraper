@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 import time
 import streamlit as st
 import sys
+import requests
 
 # PODEŠAVANJE LOKALNOG VREMENA
 try:
@@ -488,6 +489,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
 # ---------------- SCRAPERS SA VIDEO SNIMANJEM I API INTEGRACIJOM ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
+    results_dict = {}
     try:
         page = await context_wolt.new_page()
         
@@ -499,18 +501,19 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
-        # OVO JE TAJNA: Lovimo skriveni zahtev dok Playwright kuca adresu!
-        # Čim Wolt pozove svoj interni API i prosledi lat/lon, mi ga beležimo!
-        wolt_lat_lon = {}
+        # ================= API INTERCEPTOR =================
+        # Čim Wolt pozove svoj interni API u pozadini, mi hvatamo LAT i LON koordinate
+        api_info = {"lat": None, "lon": None, "cookies": ""}
+        
         async def intercept_wolt(response):
-            if "consumer-api" in response.url and "lat=" in response.url and "lon=" in response.url:
+            if "discovery/v1" in response.url and "lat=" in response.url and "lon=" in response.url:
                 try:
                     from urllib.parse import urlparse, parse_qs
                     parsed = urlparse(response.url)
                     qs = parse_qs(parsed.query)
                     if 'lat' in qs and 'lon' in qs:
-                        wolt_lat_lon['lat'] = qs['lat'][0]
-                        wolt_lat_lon['lon'] = qs['lon'][0]
+                        api_info['lat'] = qs['lat'][0]
+                        api_info['lon'] = qs['lon'][0]
                 except: pass
 
         page.on("response", intercept_wolt)
@@ -520,7 +523,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
-        # UI logika da unesemo adresu kao čovek
+        # Unos adrese samo da bi okinuli API poziv u pozadini
         try:
             input_f = page.get_by_role("combobox").first
             await input_f.wait_for(state="visible", timeout=4000)
@@ -531,7 +534,9 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await page.keyboard.press("ArrowDown")
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
-            await asyncio.sleep(3) 
+            
+            # Čekamo da se desi mrežni poziv
+            await asyncio.sleep(4) 
             
         except PlaywrightTimeoutError:
             log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
@@ -556,39 +561,34 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 await page.keyboard.press("ArrowDown")
                 await asyncio.sleep(0.5)
                 await page.keyboard.press("Enter")
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
                 
             except PlaywrightTimeoutError:
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
-                if page and error_screenshots is not None:
-                    try:
-                        err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                        await page.screenshot(path=err_path)
-                        error_screenshots.append(err_path)
-                    except: pass
                 return []
 
-        # ================= NOVA API LOGIKA UMESTO SKROLOVANJA =================
-        if 'lat' in wolt_lat_lon and 'lon' in wolt_lat_lon:
-            lat = wolt_lat_lon['lat']
-            lon = wolt_lat_lon['lon']
-            log_msg(f"[WOLT API] Lokacija prepoznata (Lat: {lat}, Lon: {lon}). Povlačim restorane direktno preko API-ja...", log_ph)
+        # ================= ZAVRŠAVAMO SA PLAYWRIGHTOM =================
+        # Uzimamo autentične kolačiće i gasimo stranicu - NEMA SKROLOVANJA!
+        cookies = await context_wolt.cookies()
+        api_info["cookies"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        
+        await page.close()
+        page = None
+        
+        # ================= ČISTO PREUZIMANJE PODATAKA PREKO API-JA =================
+        if api_info["lat"] and api_info["lon"]:
+            lat = api_info["lat"]
+            lon = api_info["lon"]
+            log_msg(f"[WOLT API] Uhvaćena lokacija (Lat: {lat}, Lon: {lon}). Povlačim restorane direktno...", log_ph)
             
-            results_dict = {}
-            import requests
-            
-            # Krademo originalne Playwright kolačiće kako bi API zahtev bio 100% autentičan
-            cookies = await context_wolt.cookies()
-            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Cookie": cookie_str,
+                "Cookie": api_info["cookies"],
                 "Accept": "application/json"
             }
             
             api_url = f"https://consumer-api.wolt.com/consumer-api/discovery/v1/pages/restaurants?lat={lat}&lon={lon}"
             
-            # API petlja (čita i paginaciju ako postoji)
             while api_url:
                 try:
                     r = requests.get(api_url, headers=headers, timeout=15)
@@ -608,14 +608,11 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                             link = f"https://wolt.com/sr/srb/restoran/{slug}" if slug else item.get("link", {}).get("target", "")
                             if not link or link in results_dict: continue
                             
-                            # Status
                             status = "Otvoreno" if venue.get("online", False) else "Zatvoreno"
                             
-                            # Ocena
                             rating_dict = venue.get("rating", {})
                             ocena = str(rating_dict.get("score", "-")) if rating_dict and "score" in rating_dict else "-"
                             
-                            # Vreme dostave
                             est = venue.get("estimate_range", "")
                             vreme_str = f"{est} min" if est else "-"
                             vreme_num = np.nan
@@ -626,7 +623,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                             elif est and est.isdigit():
                                 vreme_num = float(est)
                                 
-                            # Akcije i Oznake
                             is_new = False
                             akcije = []
                             
@@ -646,7 +642,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                             for t in venue.get("tags", []):
                                 if "wolt+" in t.lower(): akcije.append("Wolt+")
                                 
-                            # Sređivanje i grupisanje akcija
                             sredjene_akcije = []
                             for a in set(akcije):
                                 ac = a.strip()
@@ -662,13 +657,12 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                                 "Vreme_Broj": vreme_num, "Is_New": is_new, "Link": link
                             }
                             
-                    # Live UI update
                     trenutni = len(results_dict)
                     if live_ph and live_state is not None:
                         live_state["Wolt"] = trenutni
                         osvezi_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
                         
-                    # Ručno hvatanje sledeće API stranice (Wolt Paginacija)
+                    # Paginiacija (učitavanje sledeće stranice API-ja dokle god ih ima)
                     next_cursor = data.get("next")
                     if next_cursor:
                         if isinstance(next_cursor, str):
@@ -685,25 +679,18 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                         api_url = None
                         
                 except Exception as e:
-                    log_msg(f"[WOLT API Paginacija Greška] {e}", log_ph)
+                    log_msg(f"[WOLT API Greška] {e}", log_ph)
                     break
                     
-            log_msg(f"[WOLT API] Skeniranje završeno blickrigom! Uhvaćeno {len(results_dict)} restorana.", log_ph)
+            log_msg(f"[WOLT API] Skeniranje završeno bez ijednog skrola! Uhvaćeno {len(results_dict)} restorana.", log_ph)
             return list(results_dict.values())
             
         else:
-            log_msg("[WOLT UPOZORENJE] Nisam uspeo da uhvatim lat/lon API link iz pozadine. Neće izvući ništa.", log_ph)
+            log_msg("[WOLT UPOZORENJE] Nisam uspeo da uhvatim lat/lon iz pozadine. Vraćam 0.", log_ph)
             return []
-        # =====================================================================
 
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
-        if page and error_screenshots is not None:
-            try:
-                err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path)
-                error_screenshots.append(err_path)
-            except: pass
         return []
     finally:
         if page: await page.close()
@@ -873,7 +860,7 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
             sve.extend(r_glovo)
             await context_glovo.close() 
             
-            log_msg("🚲 Skrolujem WOLT...", log_ph)
+            log_msg("🚲 Preuzimam WOLT sa API-ja...", log_ph)
             context_wolt = await browser.new_context(**wa)
             await context_wolt.route("**/*", pametni_dijetalni_mod)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
