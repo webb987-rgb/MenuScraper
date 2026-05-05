@@ -4,3 +4,5 @@ pandas
 openpyxl
 fpdf2
 curl_cffi
+beautifulsoup4
+selenium
