@@ -6,10 +6,10 @@ import zipfile
 import re
 import uuid
 
-# 1. Konfiguracija stranice
-st.set_page_config(page_title="Wolt Scraper - SVETI GRAL", page_icon="🍔", layout="wide")
+# 1. Page Configuration
+st.set_page_config(page_title="Wolt Scraper - PRO", page_icon="🍔", layout="wide")
 
-# CSS za zbijanje elemenata i fiksiranje UI
+# CSS for compact elements and UI fixing
 st.markdown("""
     <style>
     .stExpander { border: none !important; margin-bottom: -10px !important; }
@@ -21,7 +21,7 @@ st.markdown("""
 
 st.title("🍔 Wolt Menu Scraper")
 
-# --- POMOĆNE FUNKCIJE ---
+# --- HELPER FUNCTIONS ---
 def fetch_data(slug):
     api_url = f"https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/{slug}/assortment"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -32,17 +32,17 @@ def fetch_data(slug):
         return None
 
 def process_all_data(data):
-    # 1. Mapiranje kategorija SA ZADRŽAVANJEM REDOSLEDA
+    # 1. Mapping categories WITH ORDER RETENTION
     ordered_sections = []
     item_to_section = {}
     
     for cat in data.get("categories", []):
-        cat_name = cat.get("name", "Meni")
+        cat_name = cat.get("name", "Menu")
         ordered_sections.append(cat_name)
         for item_id in cat.get("item_ids", []):
             item_to_section[item_id] = cat_name
 
-    # 2. Atributi i Grupe (UUID logika)
+    # 2. Attributes and Groups (UUID logic)
     wolt_group_to_new_id = {}
     groups_raw, attrs_raw = [], []
     
@@ -64,18 +64,18 @@ def process_all_data(data):
         groups_raw.append({
             "External_ID": new_gid, 
             "Max": 10, "Min": 0, 
-            "Name": group.get("name", "Prilog"),
+            "Name": group.get("name", "Option"),
             "Multiple_Selection": "NO", 
             "Collapse_by_Default": "NO", 
             "Attributes": ",".join(a_ids)
         })
 
-    # 3. Proizvodi - ZADRŽAVANJE REDOSLEDA JELA
+    # 3. Products - DISH ORDER RETENTION
     items_list = []
     seen_ids = set()
     
     for cat in data.get("categories", []):
-        cat_name = cat.get("name", "Meni")
+        cat_name = cat.get("name", "Menu")
         category_item_ids = cat.get("item_ids", [])
         
         for w_id in category_item_ids:
@@ -86,10 +86,10 @@ def process_all_data(data):
             seen_ids.add(w_id)
             new_iid = str(uuid.uuid4())
             
-            # CENA: Uvek puna cena (base_price)
+            # PRICE: Always base_price
             puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
 
-            # SLIKE: Najjača detekcija
+            # IMAGES: Advanced detection
             img_url = ""
             main_img = item.get("main_image")
             if isinstance(main_img, dict) and main_img.get("id"):
@@ -101,11 +101,11 @@ def process_all_data(data):
                     if img_id: img_url = f"https://imageproxy.wolt.com/assets/{img_id}?w=960"
                     elif first_img.get('url'): img_url = first_img.get('url')
 
-            # Grupe
+            # Groups
             gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
 
             items_list.append({
-                "External_ID": new_iid, "Product_Name": item.get("name", ""), "Collection": "MENI",
+                "External_ID": new_iid, "Product_Name": item.get("name", ""), "Collection": "MENU",
                 "Section": cat_name, "Price": puna_cena, "Image_1": img_url,
                 "Description": item.get("description", "").replace("\n", " ").strip(),
                 "Attribute_Groups": ",".join(gids), "Is_Alcoholic": "NO", "Is_Tobacco": "NO", 
@@ -114,10 +114,12 @@ def process_all_data(data):
         
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
-# --- UI LOGIKA ---
-link_input = st.text_input("Nalepi link restorana:")
+# --- UI LOGIC ---
+st.info("💡 **Instructions:** Use a clean restaurant link without extra tracking numbers at the end.")
+link_input = st.text_input("Paste restaurant link:", placeholder="https://wolt.com/en/srb/nis/restaurant/beer-point-nis")
+st.caption("Example: `https://wolt.com/en/srb/nis/restaurant/beer-point-nis`")
 
-if st.button("🚀 POKRENI"):
+if st.button("🚀 RUN"):
     if link_input:
         slug = link_input.strip().rstrip('/').split('/')[-1]
         raw = fetch_data(slug)
@@ -126,9 +128,9 @@ if st.button("🚀 POKRENI"):
             st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
             st.session_state['ordered_sections'] = o_s
             st.session_state['slug'] = slug
-            st.success("Sveti Gral je spreman! Sve je učitano po Wolt redosledu.")
+            st.success("Success! Everything loaded according to Wolt's original order.")
         else:
-            st.error("Greška pri učitavanju podataka. Proveri link.")
+            st.error("Error loading data. Please check if the link is correct and clean.")
 
 if 'df_p' in st.session_state:
     df_p = st.session_state['df_p']
@@ -141,7 +143,7 @@ if 'df_p' in st.session_state:
     col_ex, col_zip, _ = st.columns([1, 1.2, 4])
     
     with col_ex:
-        # Priprema Excela
+        # Excel Preparation
         df_excel = df_p.copy()
         df_excel['Image_1'] = "" 
         out = io.BytesIO()
@@ -149,7 +151,6 @@ if 'df_p' in st.session_state:
             df_excel.to_excel(w, index=False, sheet_name='Products')
             df_g.to_excel(w, index=False, sheet_name='Attribute Groups')
             
-            # Popravljen deo: Provera postojanja kolone pre brisanja
             if not df_a.empty and 'Group_ID_Internal' in df_a.columns:
                 df_a_final = df_a.drop(columns=['Group_ID_Internal'])
             else:
@@ -161,7 +162,7 @@ if 'df_p' in st.session_state:
     with col_zip:
         img_df = df_p[df_p['Image_1'] != ""]
         if not img_df.empty:
-            if st.button("🖼️ PRIPREMI ZIP"):
+            if st.button("🖼️ PREPARE ZIP"):
                 z_io = io.BytesIO()
                 with zipfile.ZipFile(z_io, "w") as zf:
                     for _, r in img_df.iterrows():
@@ -170,10 +171,10 @@ if 'df_p' in st.session_state:
                             res = requests.get(r['Image_1'], timeout=10)
                             zf.writestr(f"{clean_name}.jpg", res.content)
                         except: continue
-                st.download_button("🔥 SKINI ZIP", z_io.getvalue(), f"Slike_{slug}.zip")
+                st.download_button("🔥 DOWNLOAD ZIP", z_io.getvalue(), f"Images_{slug}.zip")
 
     st.markdown("---")
-    t_menu, t_raw = st.tabs(["🌳 MENU", "📊 SIROVI PODACI"])
+    t_menu, t_raw = st.tabs(["🌳 MENU PREVIEW", "📊 RAW DATA"])
     
     with t_menu:
         for s in ordered_sections:
@@ -184,7 +185,7 @@ if 'df_p' in st.session_state:
                     with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                         if p['Description']: st.write(f"_{p['Description']}_")
                         
-                        # Prikaz dodataka (opcija)
+                        # Displaying add-ons (options)
                         g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
                         for gid in g_ids:
                             if not df_g.empty:
@@ -200,5 +201,5 @@ if 'df_p' in st.session_state:
         st.dataframe(
             df_p[["Product_Name", "Section", "Price", "Image_1", "External_ID"]], 
             hide_index=True,
-            column_config={"Image_1": st.column_config.LinkColumn("Slika", display_text="Vidi 🔗")}
+            column_config={"Image_1": st.column_config.LinkColumn("Image", display_text="View 🔗")}
         )
