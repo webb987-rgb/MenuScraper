@@ -114,7 +114,7 @@ def process_all_data(data):
         
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
-# --- UI LOGIC ---
+# --- UI LOGICA ---
 st.info("💡 **Instructions:** Use a clean restaurant link without extra tracking numbers at the end.")
 link_input = st.text_input("Paste restaurant link:", placeholder="https://wolt.com/en/srb/nis/restaurant/beer-point-nis")
 st.caption("Example: `https://wolt.com/en/srb/nis/restaurant/beer-point-nis`")
@@ -162,16 +162,21 @@ if 'df_p' in st.session_state:
     with col_zip:
         img_df = df_p[df_p['Image_1'] != ""]
         if not img_df.empty:
-            if st.button("🖼️ PREPARE ZIP"):
-                z_io = io.BytesIO()
-                with zipfile.ZipFile(z_io, "w") as zf:
-                    for _, r in img_df.iterrows():
-                        try:
-                            clean_name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
-                            res = requests.get(r['Image_1'], timeout=10)
-                            zf.writestr(f"{clean_name}.jpg", res.content)
-                        except: continue
-                st.download_button("🔥 DOWNLOAD ZIP", z_io.getvalue(), f"Images_{slug}.zip")
+            # IZMENA: Novo ime dugmeta i info spinner
+            if st.button("🖼️ DOWNLOAD PICTURES"):
+                with st.spinner("Downloading pictures, please wait..."):
+                    z_io = io.BytesIO()
+                    with zipfile.ZipFile(z_io, "w") as zf:
+                        for _, r in img_df.iterrows():
+                            try:
+                                clean_name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
+                                res = requests.get(r['Image_1'], timeout=10)
+                                zf.writestr(f"{clean_name}.jpg", res.content)
+                            except: continue
+                    st.session_state['zip_ready'] = z_io.getvalue()
+            
+            if 'zip_ready' in st.session_state:
+                st.download_button("🔥 SAVE ZIP FILE", st.session_state['zip_ready'], f"Images_{slug}.zip")
 
     st.markdown("---")
     t_menu, t_raw = st.tabs(["🌳 MENU PREVIEW", "📊 RAW DATA"])
