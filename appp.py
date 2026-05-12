@@ -115,22 +115,28 @@ def process_all_data(data):
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
 # --- UI LOGICA ---
-st.info("💡 **Instructions:** Use a clean restaurant link without extra tracking numbers at the end.")
+st.info("💡 **Instructions:** Možete uneti običan link restorana ili link specifične kolekcije.")
 link_input = st.text_input("Paste restaurant link:", placeholder="https://wolt.com/en/srb/nis/restaurant/beer-point-nis")
-st.caption("Example: `https://wolt.com/en/srb/nis/restaurant/beer-point-nis`")
+st.caption("Primeri: `.../restaurant/ime-restorana` ili `.../venue/ime-restorana/collections/...` ")
 
 if st.button("🚀 RUN"):
     if link_input:
-        slug = link_input.strip().rstrip('/').split('/')[-1]
-        raw = fetch_data(slug)
-        if raw:
-            p, g, a, o_s = process_all_data(raw)
-            st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
-            st.session_state['ordered_sections'] = o_s
-            st.session_state['slug'] = slug
-            st.success("Success! Everything loaded according to Wolt's original order.")
+        # POBOLJŠANO: Regex izvlači slug bez obzira na podstranice poput /collections/popular
+        match = re.search(r'/(?:restaurant|venue)/([^/]+)', link_input.strip())
+        
+        if match:
+            slug = match.group(1)
+            raw = fetch_data(slug)
+            if raw:
+                p, g, a, o_s = process_all_data(raw)
+                st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
+                st.session_state['ordered_sections'] = o_s
+                st.session_state['slug'] = slug
+                st.success(f"Success! Everything loaded for: **{slug}**")
+            else:
+                st.error("Error loading data. Please check if the link is correct and clean.")
         else:
-            st.error("Error loading data. Please check if the link is correct and clean.")
+            st.error("Invalid URL format. Make sure it contains '/restaurant/' or '/venue/'.")
 
 if 'df_p' in st.session_state:
     df_p = st.session_state['df_p']
@@ -162,7 +168,6 @@ if 'df_p' in st.session_state:
     with col_zip:
         img_df = df_p[df_p['Image_1'] != ""]
         if not img_df.empty:
-            # IZMENA: Novo ime dugmeta i info spinner
             if st.button("🖼️ DOWNLOAD PICTURES"):
                 with st.spinner("Downloading pictures, please wait..."):
                     z_io = io.BytesIO()
@@ -190,7 +195,6 @@ if 'df_p' in st.session_state:
                     with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                         if p['Description']: st.write(f"_{p['Description']}_")
                         
-                        # Displaying add-ons (options)
                         g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
                         for gid in g_ids:
                             if not df_g.empty:
