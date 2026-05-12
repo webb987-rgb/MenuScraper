@@ -116,12 +116,12 @@ def process_all_data(data):
 
 # --- UI LOGICA ---
 st.info("💡 **Instructions:** Možete uneti običan link restorana ili link specifične kolekcije.")
-link_input = st.text_input("Paste restaurant link:", placeholder="https://wolt.com/en/srb/nis/restaurant/beer-point-nis")
-st.caption("Primeri: `.../restaurant/ime-restorana` ili `.../venue/ime-restorana/collections/...` ")
+link_input = st.text_input("Paste restaurant link:", placeholder="https://wolt.com/en/srb/belgrade/venue/breadventure/collections/popular")
+st.caption("Primeri: `.../restaurant/ime` ili `.../venue/ime/collections/...` ")
 
 if st.button("🚀 RUN"):
     if link_input:
-        # POBOLJŠANO: Regex izvlači slug bez obzira na podstranice poput /collections/popular
+        # Regex za izvlačenje sluga koji podržava i pod-kolekcije
         match = re.search(r'/(?:restaurant|venue)/([^/]+)', link_input.strip())
         
         if match:
@@ -132,11 +132,11 @@ if st.button("🚀 RUN"):
                 st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'] = p, g, a
                 st.session_state['ordered_sections'] = o_s
                 st.session_state['slug'] = slug
-                st.success(f"Success! Everything loaded for: **{slug}**")
+                st.success(f"Uspešno učitano: **{slug}**")
             else:
-                st.error("Error loading data. Please check if the link is correct and clean.")
+                st.error("Greška pri učitavanju podataka. Proverite link.")
         else:
-            st.error("Invalid URL format. Make sure it contains '/restaurant/' or '/venue/'.")
+            st.error("Neispravan format linka. Link mora sadržati '/restaurant/' ili '/venue/'.")
 
 if 'df_p' in st.session_state:
     df_p = st.session_state['df_p']
@@ -163,7 +163,8 @@ if 'df_p' in st.session_state:
                 df_a_final = df_a
             df_a_final.to_excel(w, index=False, sheet_name='Attributes')
             
-        st.download_button("📊 EXCEL", out.getvalue(), f"Wolt_{slug}.xlsx")
+        # PROMENJENO: Ime fajla je sada menu_[slug].xlsx
+        st.download_button("📊 EXCEL", out.getvalue(), f"menu_{slug}.xlsx")
         
     with col_zip:
         img_df = df_p[df_p['Image_1'] != ""]
@@ -181,7 +182,8 @@ if 'df_p' in st.session_state:
                     st.session_state['zip_ready'] = z_io.getvalue()
             
             if 'zip_ready' in st.session_state:
-                st.download_button("🔥 SAVE ZIP FILE", st.session_state['zip_ready'], f"Images_{slug}.zip")
+                # PROMENJENO: Ime fajla je sada menu_images_[slug].zip
+                st.download_button("🔥 SAVE ZIP FILE", st.session_state['zip_ready'], f"menu_images_{slug}.zip")
 
     st.markdown("---")
     t_menu, t_raw = st.tabs(["🌳 MENU PREVIEW", "📊 RAW DATA"])
