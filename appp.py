@@ -13,13 +13,13 @@ import google.generativeai as genai
 # 1. Page Configuration
 st.set_page_config(page_title="Wolt Scraper - PRO", page_icon="🍔", layout="wide")
 
-# Funkcija za bezbedno učitavanje API ključa
+# --- BEZBEDNO UČITAVANJE KLJUČA ---
 def get_gemini_key():
-    # 1. Pokušaj učitavanje iz Streamlit Secrets (za server/cloud)
+    # 1. Prvo gleda Streamlit Secrets (za cloud/server)
     if "GEMINI_API_KEY" in st.secrets:
         return st.secrets["GEMINI_API_KEY"]
     
-    # 2. Pokušaj učitavanje iz lokalnog config.json fajla
+    # 2. Zatim gleda lokalni config.json
     try:
         if os.path.exists("config.json"):
             with open("config.json", "r") as f:
@@ -31,7 +31,7 @@ def get_gemini_key():
 
 GEMINI_KEY = get_gemini_key()
 
-# CSS za UI elemente
+# CSS za lepši UI
 st.markdown("""
     <style>
     .stExpander { border: none !important; margin-bottom: -10px !important; }
@@ -40,9 +40,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🍔 Wolt Menu Scraper")
+st.title("🍔 Wolt Menu Scraper & AI OCR")
 
-# --- WOLT SCRAPER HELPER FUNCTIONS ---
+# --- WOLT SCRAPER FUNKCIJE ---
 def fetch_data(slug):
     api_url = f"https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/{slug}/assortment"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -66,10 +66,8 @@ def process_all_data(data):
     for group in data.get("options", []):
         new_gid = str(uuid.uuid4())
         wolt_group_to_new_id[group.get("id")] = new_gid
-        a_ids = []
         for val in group.get("values", []):
             new_aid = str(uuid.uuid4())
-            a_ids.append(new_aid)
             attrs_raw.append({
                 "External_ID": new_aid, "Group_ID_Internal": new_gid,
                 "Name": val.get("name", ""), "Price": val.get("price", 0) / 100,
@@ -77,7 +75,8 @@ def process_all_data(data):
             })
         groups_raw.append({
             "External_ID": new_gid, "Max": 10, "Min": 0, "Name": group.get("name", "Option"),
-            "Multiple_Selection": "NO", "Collapse_by_Default": "NO", "Attributes": ",".join(a_ids)
+            "Multiple_Selection": "NO", "Collapse_by_Default": "NO", 
+            "Attributes": ",".join([a["External_ID"] for a in attrs_raw if a["Group_ID_Internal"] == new_gid])
         })
 
     items_list = []
@@ -89,15 +88,16 @@ def process_all_data(data):
             item = next((i for i in data.get("items", []) if i.get("id") == w_id), None)
             if not item: continue
             seen_ids.add(w_id)
-            new_iid = str(uuid.uuid4())
             puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
             img_url = ""
             main_img = item.get("main_image")
             if isinstance(main_img, dict) and main_img.get("id"):
                 img_url = f"https://imageproxy.wolt.com/assets/{main_img['id']}?w=960"
+            
             gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
+            
             items_list.append({
-                "External_ID": new_iid, "Product_Name": item.get("name", ""), "Collection": "MENU",
+                "External_ID": str(uuid.uuid4()), "Product_Name": item.get("name", ""), "Collection": "MENU",
                 "Section": cat_name, "Price": puna_cena, "Image_1": img_url,
                 "Description": item.get("description", "").replace("\n", " ").strip(),
                 "Attribute_Groups": ",".join(gids), "Is_Alcoholic": "NO", "Is_Tobacco": "NO", 
@@ -105,23 +105,25 @@ def process_all_data(data):
             })
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
-# --- GEMINI VISION EXTRACTION ---
+# --- GEMINI AI FUNKCIJA (Fix za 404 grešku) ---
 def extract_menu_with_gemini(uploaded_files, api_key):
     genai.configure(api_key=api_key)
-    # Koristimo eksplicitan naziv modela koji je stabilan
-    model = genai.GenerativeModel('gemini-1.5-flash')
     
-    prompt = """You are a menu extraction expert. Analyze the provided images and return ONLY a JSON object.
-    Structure:
+    # Koristimo punu putanju do modela kako bismo izbegli v1beta konflikte
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
+    
+    prompt = """Analiziraj priložene slike jelovnika i vrati ISKLJUČIVO JSON objekat.
+    Struktura:
     {
       "sections": [
         {
-          "name": "Section Name",
-          "items": [{"name": "Item Name", "price": 1000, "description": "desc"}]
+          "name": "Naziv Sekcije",
+          "items": [{"name": "Ime jela", "price": 1200, "description": "opis"}]
         }
       ]
     }
-    Rules: Prices must be integers in RSD. If price is missing, use 0. Return ONLY raw JSON."""
+    Pravila: Cene moraju biti celi brojevi (RSD). Ako nema opisa, ostavi prazan string. 
+    Vrati samo sirov JSON bez markdown oznaka."""
 
     content = []
     for uf in uploaded_files:
@@ -132,12 +134,12 @@ def extract_menu_with_gemini(uploaded_files, api_key):
     content.append(prompt)
     
     response = model.generate_content(content)
-    # Čišćenje markdown-a iz odgovora
     text_response = response.text
+    # Čišćenje JSON-a ako AI doda ```json ... ```
     clean_json = re.sub(r'```json|```', '', text_response).strip()
     return json.loads(clean_json)
 
-# --- UTILS ---
+# --- POMOĆNE FUNKCIJE ---
 def build_dataframes_from_photo(menu_data):
     items_list, ordered_sections = [], []
     for section in menu_data.get("sections", []):
@@ -165,52 +167,57 @@ def render_menu_preview(df_p, ordered_sections):
     for s in ordered_sections:
         prods = df_p[df_p['Section'] == s]
         if not prods.empty:
-            st.markdown(f"**{s}**")
+            st.markdown(f"### {s}")
             for _, p in prods.iterrows():
                 with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                     if p['Description']: st.write(f"_{p['Description']}_")
 
 # --- UI TABS ---
-tab_wolt, tab_photo = st.tabs(["🌐 Wolt Scraper", "📷 Photo Menu"])
+tab_wolt, tab_photo = st.tabs(["🌐 Wolt Scraper", "📷 Photo Menu (AI)"])
 
 with tab_wolt:
-    link_input = st.text_input("Wolt Link:", placeholder="https://wolt.com/...")
-    if st.button("🚀 RUN WOLT"):
-        match = re.search(r'/(?:restaurant|venue)/([^/]+)', link_input)
+    link = st.text_input("Unesi Wolt link restorana:")
+    if st.button("🚀 POKRENI WOLT"):
+        match = re.search(r'/(?:restaurant|venue)/([^/]+)', link)
         if match:
             slug = match.group(1)
             raw = fetch_data(slug)
             if raw:
                 p, g, a, o_s = process_all_data(raw)
                 st.session_state['w_p'], st.session_state['w_g'], st.session_state['w_a'], st.session_state['w_o'] = p, g, a, o_s
-                st.success("Podaci učitani!")
-        else: st.error("Link nije ispravan.")
+                st.success("Wolt podaci su spremni!")
+        else: st.error("Neispravan link.")
 
     if 'w_p' in st.session_state:
-        st.download_button("📊 Preuzmi Excel", build_excel(st.session_state['w_p'], st.session_state['w_g'], st.session_state['w_a']), "wolt_menu.xlsx")
+        st.download_button("📊 Preuzmi Wolt Excel", build_excel(st.session_state['w_p'], st.session_state['w_g'], st.session_state['w_a']), "wolt_menu.xlsx")
         render_menu_preview(st.session_state['w_p'], st.session_state['w_o'])
 
 with tab_photo:
-    st.subheader("AI Photo extraction")
+    st.info("💡 Ovaj tab koristi Gemini 1.5 Flash za čitanje teksta sa slika.")
+    
+    # Prikaz statusa ključa
     if not GEMINI_KEY:
-        manual_key = st.text_input("Unesite Gemini API Key:", type="password")
+        current_api_key = st.text_input("Unesite Gemini API Key:", type="password")
     else:
-        st.info("✅ API ključ je učitan iz podešavanja.")
-        manual_key = GEMINI_KEY
+        st.success("✅ Ključ je automatski učitan.")
+        current_api_key = GEMINI_KEY
 
-    rest_name = st.text_input("Naziv restorana:")
-    files = st.file_uploader("Slike:", type=["jpg", "png", "webp"], accept_multiple_files=True)
+    rest_name = st.text_input("Naziv restorana (za fajl):", "Moj_Restoran")
+    uploaded_files = st.file_uploader("Uploaduj slike menija:", type=["jpg", "png", "webp"], accept_multiple_files=True)
     
     if st.button("🤖 ANALIZIRAJ SLIKE", type="primary"):
-        if manual_key and files:
-            with st.spinner("Gemini razmišlja..."):
+        if current_api_key and uploaded_files:
+            with st.spinner("AI analizira slike..."):
                 try:
-                    data = extract_menu_with_gemini(files, manual_key)
+                    data = extract_menu_with_gemini(uploaded_files, current_api_key)
                     p, g, a, o = build_dataframes_from_photo(data)
                     st.session_state['p_p'], st.session_state['p_g'], st.session_state['p_a'], st.session_state['p_o'] = p, g, a, o
-                    st.success("Gotovo!")
-                except Exception as e: st.error(f"Greška: {e}")
+                    st.success("Analiza završena!")
+                except Exception as e:
+                    st.error(f"Došlo je do greške: {str(e)}")
+        else:
+            st.warning("Nedostaje API ključ ili slike.")
 
     if 'p_p' in st.session_state:
-        st.download_button("📊 Preuzmi Excel", build_excel(st.session_state['p_p'], st.session_state['p_g'], st.session_state['p_a']), f"{rest_name}.xlsx")
+        st.download_button("📊 Preuzmi AI Excel", build_excel(st.session_state['p_p'], st.session_state['p_g'], st.session_state['p_a']), f"{rest_name}_meni.xlsx")
         render_menu_preview(st.session_state['p_p'], st.session_state['p_o'])
