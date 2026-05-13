@@ -2,8 +2,4 @@ streamlit
 requests
 pandas
 openpyxl
-fpdf2
-curl_cffi
-beautifulsoup4
-selenium
-google-generativeai
+google-generativeai>=0.7.0
