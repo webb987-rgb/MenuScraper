@@ -6,3 +6,4 @@ fpdf2
 curl_cffi
 beautifulsoup4
 selenium
+google-generativeai
