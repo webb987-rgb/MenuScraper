@@ -7,11 +7,10 @@ import re
 import uuid
 import json
 import os
-import math
 import google.generativeai as genai
 
 # 1. Page Configuration
-st.set_page_config(page_title="Wolt Scraper - PRO", page_icon="🍔", layout="wide")
+st.set_page_config(page_title="Menu Scraper PRO", page_icon="🍔", layout="wide")
 
 # --- BEZBEDNO UČITAVANJE VIŠE API KLJUČEVA ---
 def get_gemini_keys():
@@ -50,141 +49,80 @@ def apply_price_logic(price, markup_percent, round_up):
         final_price = ((final_price + 9) // 10) * 10
     return final_price
 
-# --- WOLT LOGIKA (Standardna) ---
-def fetch_wolt_data(slug):
+# --- WOLT LOGIKA ---
+def fetch_data(slug):
     api_url = f"https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/{slug}/assortment"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r = requests.get(api_url, headers=headers, timeout=15)
         return r.json() if r.status_code == 200 else None
-    except: return None
+    except:
+        return None
+
+def process_all_data(data):
+    ordered_sections = []
+    item_to_section = {}
+    for cat in data.get("categories", []):
+        cat_name = cat.get("name", "Menu")
+        ordered_sections.append(cat_name)
+        for item_id in cat.get("item_ids", []):
+            item_to_section[item_id] = cat_name
+
+    wolt_group_to_new_id = {}
+    groups_raw, attrs_raw = [], []
+    for group in data.get("options", []):
+        new_gid = str(uuid.uuid4())
+        wolt_group_to_new_id[group.get("id")] = new_gid
+        a_ids = []
+        for val in group.get("values", []):
+            new_aid = str(uuid.uuid4())
+            a_ids.append(new_aid)
+            attrs_raw.append({
+                "External_ID": new_aid, "Group_ID_Internal": new_gid,
+                "Name": val.get("name", ""), "Price": val.get("price", 0) / 100,
+                "Enabled": "YES", "Selected_by_Default": "NO"
+            })
+        groups_raw.append({
+            "External_ID": new_gid, "Max": 10, "Min": 0, "Name": group.get("name", "Option"),
+            "Multiple_Selection": "NO", "Collapse_by_Default": "NO", "Attributes": ",".join(a_ids)
+        })
+
+    items_list = []
+    seen_ids = set()
+    for cat in data.get("categories", []):
+        cat_name = cat.get("name", "Menu")
+        for w_id in cat.get("item_ids", []):
+            if w_id in seen_ids: continue
+            item = next((i for i in data.get("items", []) if i.get("id") == w_id), None)
+            if not item: continue
+            seen_ids.add(w_id)
+            new_iid = str(uuid.uuid4())
+            puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
+            img_url = ""
+            main_img = item.get("main_image")
+            if isinstance(main_img, dict) and main_img.get("id"):
+                img_url = f"https://imageproxy.wolt.com/assets/{main_img['id']}?w=960"
+            gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
+            items_list.append({
+                "External_ID": new_iid, "Product_Name": item.get("name", ""), "Collection": "MENU",
+                "Section": cat_name, "Price": puna_cena, "Image_1": img_url,
+                "Description": item.get("description", "").replace("\n", " ").strip(),
+                "Attribute_Groups": ",".join(gids), "Is_Alcoholic": "NO", "Is_Tobacco": "NO", 
+                "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
+            })
+    return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
 # --- GEMINI AI FUNKCIJA (Rotacija ključeva) ---
 def extract_menu_with_gemini_core(content_to_send, api_keys_list):
-    """Zajednička funkcija za slanje podataka (slike, PDF ili Tekst) na Gemini."""
-    prompt = """Extract all dishes, prices and descriptions. 
-    Return ONLY a valid JSON object with this structure:
-    {"sections": [{"name": "Category", "items": [{"name": "Dish Name", "price": 100, "description": "text"}]}]}
-    Rules: Prices must be integers (RSD). If description is missing, use empty string. Return ONLY raw JSON."""
+    prompt = """Analiziraj priloženi sadržaj (slike, PDF ili tekst sa sajta) i izvuci sva jela i cene.
+    Vrati ISKLJUČIVO JSON objekat sa ovom strukturom:
+    {"sections": [{"name": "Naziv sekcije", "items": [{"name": "Naziv jela", "price": 100, "description": "Opis jela ako postoji"}]}]}
+    Pravila: Cene moraju biti celi brojevi u RSD. Ako nema opisa, ostavi prazan string. Vrati samo sirov JSON bez markdowna."""
     
     full_request = content_to_send + [prompt]
+    last_error = None
     
     for idx, key in enumerate(api_keys_list):
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(full_request)
-            clean_json = re.sub(r'```json|```', '', response.text).strip()
-            return json.loads(clean_json)
-        except Exception as e:
-            if idx < len(api_keys_list) - 1:
-                st.warning(f"Prebacujem na sledeći ključ...")
-                continue
-            else: raise Exception(f"Greška na svim ključevima: {e}")
-
-# --- POMOĆNE FUNKCIJE ZA TABELE ---
-def build_dataframes(menu_data, markup, round_up):
-    items_list, ordered_sections = [], []
-    for section in menu_data.get("sections", []):
-        sec_name = section.get("name", "Ostalo").strip()
-        if sec_name not in ordered_sections: ordered_sections.append(sec_name)
-        for item in section.get("items", []):
-            p = apply_price_logic(item.get("price", 0), markup, round_up)
-            items_list.append({
-                "External_ID": str(uuid.uuid4()), "Product_Name": str(item.get("name", "")),
-                "Collection": "MENU", "Section": sec_name, "Price": p,
-                "Description": str(item.get("description", "")), "Image_1": ""
-            })
-    return pd.DataFrame(items_list), ordered_sections
-
-def build_excel(df_p):
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as w:
-        df_p.to_excel(w, index=False, sheet_name='Products')
-        # Prazni tabovi za kompatibilnost
-        pd.DataFrame(columns=["External_ID", "Name"]).to_excel(w, index=False, sheet_name='Attribute Groups')
-        pd.DataFrame(columns=["Name"]).to_excel(w, index=False, sheet_name='Attributes')
-    return out.getvalue()
-
-# ============================================================
-# UI TABS
-# ============================================================
-tab_wolt, tab_photo, tab_link_ai = st.tabs(["🌐 Wolt Scraper", "📄 Photo/PDF AI Menu", "🔗 Link AI Menu"])
-
-# --- TAB 1: WOLT ---
-with tab_wolt:
-    link_w = st.text_input("Wolt Link:")
-    if st.button("🚀 Run Wolt"):
-        # (Standardni Wolt kod koji već imaš...)
-        st.info("Ovde ostaje tvoj postojeći kod za direktan Wolt scrap...")
-
-# --- TAB 2: PHOTO/PDF AI ---
-with tab_photo:
-    st.subheader("Analiza slika i dokumenata")
-    rest_n_p = st.text_input("Restoran:", key="rest_p")
-    markup_p = st.number_input("Marža %:", value=0, key="mark_p")
-    round_p = st.checkbox("Zaokruži na deseticu", key="round_p")
-    files = st.file_uploader("Uploaduj Slike/PDF:", type=["jpg","png","pdf"], accept_multiple_files=True)
-    
-    if st.button("🤖 Analiziraj Slike", type="primary"):
-        if files and GEMINI_KEYS_LIST:
-            with st.spinner("AI čita slike/PDF..."):
-                content = []
-                for f in files:
-                    d = f.read(); f.seek(0)
-                    content.append({"mime_type": f.type, "data": d})
-                res = extract_menu_with_gemini_core(content, GEMINI_KEYS_LIST)
-                st.session_state['ai_res'] = res
-                st.session_state['ai_name'] = rest_n_p
-
-    if 'ai_res' in st.session_state:
-        df, sects = build_dataframes(st.session_state['ai_res'], markup_p, round_p)
-        st.download_button("📊 Preuzmi Excel", build_excel(df), f"{st.session_state['ai_name']}.xlsx")
-        st.dataframe(df)
-
-# --- TAB 3: LINK AI (NOVO!) ---
-with tab_link_ai:
-    st.subheader("AI Analiza bilo kog linka")
-    st.info("💡 Ubaci link veb-sajta restorana (npr. njihov sajt ili on-line meni). AI će pokušati da pročita sadržaj stranice.")
-    
-    link_input_ai = st.text_input("Unesi link veb-sajta restorana:", placeholder="https://www.restoran.rs/jelovnik")
-    
-    col_a1, col_a2 = st.columns(2)
-    with col_a1:
-        rest_n_l = st.text_input("Naziv restorana:", key="rest_l")
-    with col_a2:
-        markup_l = st.number_input("Marža %:", value=0, key="mark_l")
-        round_l = st.checkbox("Zaokruži na deseticu", key="round_l")
-
-    if st.button("🌐 ANALIZIRAJ LINK", type="primary"):
-        if link_input_ai and GEMINI_KEYS_LIST:
-            with st.spinner("Preuzimam sadržaj stranice i šaljem AI-ju na analizu..."):
-                try:
-                    # 1. Preuzimanje teksta sa linka
-                    r = requests.get(link_input_ai, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-                    if r.status_code == 200:
-                        # Uzimamo sirov tekstualni sadržaj (bez HTML tagova je bolje)
-                        # Koristimo jednostavan regex da očistimo HTML za Gemini (da mu bude lakše)
-                        html_content = r.text
-                        text_only = re.sub('<[^<]+?>', '', html_content) # Brzo čišćenje HTML-a
-                        
-                        # 2. Slanje teksta Gemini-ju
-                        content = [f"Ovo je tekstualni sadržaj preuzet sa veb sajta: \n\n {text_only[:15000]}"] # Limit 15k karaktera radi stabilnosti
-                        res = extract_menu_with_gemini_core(content, GEMINI_KEYS_LIST)
-                        
-                        st.session_state['link_ai_res'] = res
-                        st.session_state['link_ai_name'] = rest_n_l
-                        st.success("Analiza linka uspešna!")
-                    else:
-                        st.error(f"Greška: Veb sajt je odbio pristup (Status: {r.status_code})")
-                except Exception as e:
-                    st.error(f"Došlo je do greške: {e}")
-        else:
-            st.warning("Unesite link i proverite API ključeve.")
-
-    if 'link_ai_res' in st.session_state:
-        df_l, sects_l = build_dataframes(st.session_state['link_ai_res'], markup_l, round_l)
-        st.download_button("📊 Preuzmi Excel (iz Linka)", build_excel(df_l), f"{st.session_state['link_ai_name']}_link.xlsx")
-        
-        for s in sects_l:
-            with st.expander(f"Sekcija: {s}"):
-                st.table(df_l[df_l['Section'] == s][["Product_Name", "Price", "Description"]])
+            model = genai.GenerativeModel('gemini-2.
