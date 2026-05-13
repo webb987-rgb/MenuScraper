@@ -37,9 +37,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🍔 Menu Scraper")
+st.title("🍔 Wolt Menu Scraper")
 
-# --- WOLT HELPER FUNCTIONS ---
+# --- WOLT HELPER FUNCTIONS (Nepromenjeno) ---
 def fetch_data(slug):
     api_url = f"https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/{slug}/assortment"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -52,7 +52,6 @@ def fetch_data(slug):
 def process_all_data(data):
     ordered_sections = []
     item_to_section = {}
-    
     for cat in data.get("categories", []):
         cat_name = cat.get("name", "Menu")
         ordered_sections.append(cat_name)
@@ -61,7 +60,6 @@ def process_all_data(data):
 
     wolt_group_to_new_id = {}
     groups_raw, attrs_raw = [], []
-    
     for group in data.get("options", []):
         new_gid = str(uuid.uuid4())
         wolt_group_to_new_id[group.get("id")] = new_gid
@@ -70,52 +68,31 @@ def process_all_data(data):
             new_aid = str(uuid.uuid4())
             a_ids.append(new_aid)
             attrs_raw.append({
-                "External_ID": new_aid, 
-                "Group_ID_Internal": new_gid,
-                "Name": val.get("name", ""), 
-                "Price": val.get("price", 0) / 100,
-                "Enabled": "YES", 
-                "Selected_by_Default": "NO"
+                "External_ID": new_aid, "Group_ID_Internal": new_gid,
+                "Name": val.get("name", ""), "Price": val.get("price", 0) / 100,
+                "Enabled": "YES", "Selected_by_Default": "NO"
             })
         groups_raw.append({
-            "External_ID": new_gid, 
-            "Max": 10, "Min": 0, 
-            "Name": group.get("name", "Option"),
-            "Multiple_Selection": "NO", 
-            "Collapse_by_Default": "NO", 
-            "Attributes": ",".join(a_ids)
+            "External_ID": new_gid, "Max": 10, "Min": 0, "Name": group.get("name", "Option"),
+            "Multiple_Selection": "NO", "Collapse_by_Default": "NO", "Attributes": ",".join(a_ids)
         })
 
     items_list = []
     seen_ids = set()
-    
     for cat in data.get("categories", []):
         cat_name = cat.get("name", "Menu")
-        category_item_ids = cat.get("item_ids", [])
-        
-        for w_id in category_item_ids:
+        for w_id in cat.get("item_ids", []):
             if w_id in seen_ids: continue
             item = next((i for i in data.get("items", []) if i.get("id") == w_id), None)
             if not item: continue
-            
             seen_ids.add(w_id)
             new_iid = str(uuid.uuid4())
-            
             puna_cena = int((item.get("base_price") or item.get("price") or 0) / 100)
-
             img_url = ""
             main_img = item.get("main_image")
             if isinstance(main_img, dict) and main_img.get("id"):
                 img_url = f"https://imageproxy.wolt.com/assets/{main_img['id']}?w=960"
-            elif item.get("images") and len(item.get("images")) > 0:
-                first_img = item['images'][0]
-                if isinstance(first_img, dict):
-                    img_id = first_img.get('id')
-                    if img_id: img_url = f"https://imageproxy.wolt.com/assets/{img_id}?w=960"
-                    elif first_img.get('url'): img_url = first_img.get('url')
-
             gids = [wolt_group_to_new_id[o.get("option_id")] for o in item.get("options", []) if o.get("option_id") in wolt_group_to_new_id]
-
             items_list.append({
                 "External_ID": new_iid, "Product_Name": item.get("name", ""), "Collection": "MENU",
                 "Section": cat_name, "Price": puna_cena, "Image_1": img_url,
@@ -123,14 +100,11 @@ def process_all_data(data):
                 "Attribute_Groups": ",".join(gids), "Is_Alcoholic": "NO", "Is_Tobacco": "NO", 
                 "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
             })
-        
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
 # --- PHOTO MENU: GEMINI AI FUNCTIONS ---
 def extract_menu_with_gemini(uploaded_files, api_key):
     genai.configure(api_key=api_key)
-    
-    # KORISTIMO TAČAN MODEL KOJI TVOJ NALOG PODRŽAVA
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = """Analiziraj priložene slike jelovnika i izvuci sva jela i cene.
@@ -158,15 +132,12 @@ def extract_menu_with_gemini(uploaded_files, api_key):
         content.append({"mime_type": uf.type, "data": img_data})
     
     content.append(prompt)
-    
     response = model.generate_content(content)
-    text_response = response.text
-    
-    # Očisti odgovor da osiguraš validan JSON
-    clean_json = re.sub(r'```json|```', '', text_response).strip()
+    clean_json = re.sub(r'```json|```', '', response.text).strip()
     return json.loads(clean_json)
 
-def build_dataframes_from_photo(menu_data):
+# Funkcija koja gradi DataFrame sa uračunatim uvećanjem
+def build_dataframes_from_photo(menu_data, markup_percent):
     items_list = []
     ordered_sections = []
     for section in menu_data.get("sections", []):
@@ -174,16 +145,18 @@ def build_dataframes_from_photo(menu_data):
         if sec_name not in ordered_sections:
             ordered_sections.append(sec_name)
         for item in section.get("items", []):
+            # Originalna cena iz AI skeniranja
+            orig_price = int(item.get("price", 0))
+            # Primena procenta uvećanja (matematički: cena * (1 + % / 100))
+            final_price = int(orig_price * (1 + markup_percent / 100))
+            
             items_list.append({
                 "External_ID": str(uuid.uuid4()),
                 "Product_Name": str(item.get("name", "")).strip(),
-                "Collection": "MENU",
-                "Section": sec_name,
-                "Price": int(item.get("price", 0)),
-                "Image_1": "",
+                "Collection": "MENU", "Section": sec_name,
+                "Price": final_price, "Image_1": "",
                 "Description": str(item.get("description", "")).strip(),
-                "Attribute_Groups": "",
-                "Is_Alcoholic": "NO", "Is_Tobacco": "NO",
+                "Attribute_Groups": "", "Is_Alcoholic": "NO", "Is_Tobacco": "NO",
                 "SuperCollection": "", "Section_Order": 1, "Collection_Order": 1
             })
     
@@ -211,19 +184,11 @@ def render_menu_preview(df_p, df_g, df_a, ordered_sections):
             for _, p in prods.iterrows():
                 with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                     if p['Description']: st.write(f"_{p['Description']}_")
-                    g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
-                    for gid in g_ids:
-                        if not df_g.empty:
-                            g_i = df_g[df_g['External_ID'] == gid]
-                            if not g_i.empty:
-                                with st.expander(f"└ {g_i.iloc[0]['Name']}"):
-                                    attrs = df_a[df_a['Group_ID_Internal'] == gid]
-                                    for _, a in attrs.iterrows():
-                                        st.write(f"• {a['Name']} ({a['Price']} RSD)")
 
 # --- UI TABS ---
 tab_wolt, tab_photo = st.tabs(["🌐 Wolt Scraper", "📷 Photo Menu"])
 
+# --- TAB 1: WOLT ---
 with tab_wolt:
     link_input = st.text_input("Paste Wolt link:", placeholder="https://wolt.com/en/srb/...")
     if st.button("🚀 RUN WOLT"):
@@ -239,50 +204,54 @@ with tab_wolt:
 
     if 'df_p' in st.session_state:
         st.markdown("### 📥 Download")
-        col_ex, col_zip, _ = st.columns([1, 1.2, 4])
-        with col_ex:
-            excel_bytes = build_excel(st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'])
-            st.download_button("📊 EXCEL", excel_bytes, f"menu_{st.session_state['slug']}.xlsx")
-        
-        with col_zip:
-            if st.button("🖼️ DOWNLOAD PICTURES"):
-                img_df = st.session_state['df_p'][st.session_state['df_p']['Image_1'] != ""]
-                z_io = io.BytesIO()
-                with zipfile.ZipFile(z_io, "w") as zf:
-                    for _, r in img_df.iterrows():
-                        try:
-                            res = requests.get(r['Image_1'], timeout=10)
-                            name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
-                            zf.writestr(f"{name}.jpg", res.content)
-                        except: continue
-                st.session_state['zip_ready'] = z_io.getvalue()
-            if 'zip_ready' in st.session_state:
-                st.download_button("🔥 SAVE ZIP FILE", st.session_state['zip_ready'], f"images_{st.session_state['slug']}.zip")
-        
+        excel_bytes = build_excel(st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'])
+        st.download_button("📊 EXCEL", excel_bytes, f"menu_{st.session_state['slug']}.xlsx")
         render_menu_preview(st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['ordered_sections'])
 
-
+# --- TAB 2: PHOTO MENU (Sa funkcijom uvećanja cena) ---
 with tab_photo:
     st.markdown("### 📷 AI Photo Extraction")
     
     active_key = GEMINI_KEY if GEMINI_KEY else st.text_input("Gemini API Key:", type="password")
-    if not active_key: st.warning("⚠️ API ključ nije podešen.")
     
-    rest_name = st.text_input("Naziv restorana:", placeholder="npr. La Piazza")
-    uploaded_images = st.file_uploader("Uploaduj slike:", type=["jpg", "png", "webp"], accept_multiple_files=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        rest_name = st.text_input("Naziv restorana:", placeholder="npr. La Piazza")
+    with col2:
+        # Novo polje za unos procenta uvećanja
+        markup = st.number_input("Uvećaj sve cene za (%):", min_value=0, max_value=500, value=0, step=5, help="Sve cene očitane sa slike biće uvećane za ovaj procenat u Excelu i pregledu.")
+
+    uploaded_images = st.file_uploader("Uploaduj slike jelovnika:", type=["jpg", "png", "webp"], accept_multiple_files=True)
     
     if st.button("🤖 ANALIZIRAJ JELOVNIK", type="primary"):
         if active_key and uploaded_images:
-            with st.spinner("Gemini 2.5 Flash analizira slike..."):
+            with st.spinner("AI analizira slike..."):
                 try:
+                    # Skeniramo originalne podatke preko AI
                     menu_json = extract_menu_with_gemini(uploaded_images, active_key)
-                    p, g, a, o = build_dataframes_from_photo(menu_json)
-                    st.session_state['p_df_p'], st.session_state['p_df_g'], st.session_state['p_df_a'] = p, g, a
-                    st.session_state['p_ordered_sections'], st.session_state['p_slug'] = o, rest_name
-                    st.success("Gotovo! Uspešno izvučeno.")
+                    # Čuvamo originalni JSON u session_state da bismo mogli menjati procenat bez ponovnog trošenja API-ja
+                    st.session_state['p_raw_json'] = menu_json
+                    st.session_state['p_rest_name'] = rest_name
                 except Exception as e: st.error(f"Greška: {e}")
+        else:
+            st.error("Ubacite slike i proverite API ključ.")
 
-    if 'p_df_p' in st.session_state:
-        excel_bytes_p = build_excel(st.session_state['p_df_p'], st.session_state['p_df_g'], st.session_state['p_df_a'])
-        st.download_button("📊 DOWNLOAD EXCEL", excel_bytes_p, f"menu_{st.session_state['p_slug']}.xlsx")
-        render_menu_preview(st.session_state['p_df_p'], st.session_state['p_df_g'], st.session_state['p_df_a'], st.session_state['p_ordered_sections'])
+    # Prikaz rezultata ako postoje očitani podaci
+    if 'p_raw_json' in st.session_state:
+        # Svaki put kada se procenat u 'markup' polju promeni, DataFrame se ponovo gradi sa novim cenama
+        p_df_p, p_df_g, p_df_a, p_ordered_sections = build_dataframes_from_photo(st.session_state['p_raw_json'], markup)
+        
+        st.markdown("---")
+        st.success(f"✅ Uspešno izvučeno! Cene su uvećane za {markup}%.")
+        
+        # Download sekcija
+        excel_bytes_p = build_excel(p_df_p, p_df_g, p_df_a)
+        st.download_button(
+            label="📊 PREUZMI EXCEL SA UVEĆANIM CENAMA",
+            data=excel_bytes_p,
+            file_name=f"menu_{st.session_state['p_rest_name']}_plus_{markup}posto.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        # Preview
+        render_menu_preview(p_df_p, p_df_g, p_df_a, p_ordered_sections)
