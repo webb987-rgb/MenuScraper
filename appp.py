@@ -7,6 +7,7 @@ import re
 import uuid
 import json
 import os
+import math
 import google.generativeai as genai
 
 # 1. Page Configuration
@@ -129,7 +130,6 @@ def extract_menu_with_gemini(uploaded_files, api_key):
     for uf in uploaded_files:
         file_data = uf.read()
         uf.seek(0)
-        # Ovde Gemini pametno prihvata i "image/jpeg" i "application/pdf"
         content.append({"mime_type": uf.type, "data": file_data})
     
     content.append(prompt)
@@ -137,7 +137,8 @@ def extract_menu_with_gemini(uploaded_files, api_key):
     clean_json = re.sub(r'```json|```', '', response.text).strip()
     return json.loads(clean_json)
 
-def build_dataframes_from_photo(menu_data, markup_percent):
+# Ažurirana funkcija sa opcijom za zaokruživanje
+def build_dataframes_from_photo(menu_data, markup_percent, round_up=False):
     items_list = []
     ordered_sections = []
     for section in menu_data.get("sections", []):
@@ -146,7 +147,13 @@ def build_dataframes_from_photo(menu_data, markup_percent):
             ordered_sections.append(sec_name)
         for item in section.get("items", []):
             orig_price = int(item.get("price", 0))
+            # Primena procenta
             final_price = int(orig_price * (1 + markup_percent / 100))
+            
+            # NOVO: Logika za zaokruživanje na prvu veću deseticu
+            if round_up and final_price > 0:
+                # Primer: (1008 + 9) // 10 = 101 -> 101 * 10 = 1010
+                final_price = ((final_price + 9) // 10) * 10
             
             items_list.append({
                 "External_ID": str(uuid.uuid4()),
@@ -206,7 +213,7 @@ with tab_wolt:
         st.download_button("📊 EXCEL", excel_bytes, f"menu_{st.session_state['slug']}.xlsx")
         render_menu_preview(st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['ordered_sections'])
 
-# --- TAB 2: AI MENI (Slike + PDF + Procenat) ---
+# --- TAB 2: AI MENI ---
 with tab_photo:
     st.markdown("### 📄 AI Extrakcija iz Slike ili PDF-a")
     
@@ -216,9 +223,10 @@ with tab_photo:
     with col1:
         rest_name = st.text_input("Naziv restorana:", placeholder="npr. La Piazza")
     with col2:
-        markup = st.number_input("Uvećaj sve cene za (%):", min_value=0, max_value=500, value=0, step=5, help="Prilagođavanje cena pre eksporta.")
+        markup = st.number_input("Uvećaj sve cene za (%):", min_value=0, max_value=500, value=0, step=5)
+        # NOVO: Checkbox za zaokruživanje
+        round_up = st.checkbox("Zaokruži cenu na prvi veći broj (npr. 1008 -> 1010 RSD)")
 
-    # DODATO 'pdf' U DOZVOLJENE FORMATE
     uploaded_files = st.file_uploader(
         "Uploaduj slike ili PDF jelovnika:", 
         type=["jpg", "jpeg", "png", "webp", "pdf"], 
@@ -227,7 +235,7 @@ with tab_photo:
     
     if st.button("🤖 ANALIZIRAJ JELOVNIK", type="primary"):
         if active_key and uploaded_files:
-            with st.spinner("AI analizira fajlove (strpljenja, pogotovo za veće PDF-ove)..."):
+            with st.spinner("AI analizira fajlove..."):
                 try:
                     menu_json = extract_menu_with_gemini(uploaded_files, active_key)
                     st.session_state['p_raw_json'] = menu_json
@@ -236,21 +244,25 @@ with tab_photo:
         else:
             st.error("Ubacite fajlove i proverite API ključ.")
 
-    # Prikaz i preračunavanje ako imamo podatke u memoriji
     if 'p_raw_json' in st.session_state:
-        p_df_p, p_df_g, p_df_a, p_ordered_sections = build_dataframes_from_photo(st.session_state['p_raw_json'], markup)
+        # Prosleđujemo i informaciju o tome da li je štiklirano zaokruživanje
+        p_df_p, p_df_g, p_df_a, p_ordered_sections = build_dataframes_from_photo(
+            st.session_state['p_raw_json'], 
+            markup, 
+            round_up
+        )
         
         st.markdown("---")
-        if markup > 0:
-            st.success(f"✅ Uspešno izvučeno! Sve cene su uvećane za {markup}%.")
-        else:
-            st.success("✅ Uspešno izvučeno! Cene su originalne (uvećanje 0%).")
+        msg = f"✅ Uspešno izvučeno! Cene uvećane za {markup}%." if markup > 0 else "✅ Uspešno izvučeno!"
+        if round_up:
+            msg += " (Zaokruženo na deseticu)"
+        st.success(msg)
         
         excel_bytes_p = build_excel(p_df_p, p_df_g, p_df_a)
         st.download_button(
-            label=f"📊 PREUZMI EXCEL (Uvećanje {markup}%)",
+            label=f"📊 PREUZMI EXCEL",
             data=excel_bytes_p,
-            file_name=f"menu_{st.session_state['p_rest_name']}_plus_{markup}posto.xlsx",
+            file_name=f"menu_{st.session_state['p_rest_name']}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
