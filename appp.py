@@ -7,7 +7,12 @@ import re
 import uuid
 import json
 import os
+import time
 import google.generativeai as genai
+
+# --- NOVO: SELENIUM IMPORTI ---
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 
 # 1. Page Configuration
 st.set_page_config(page_title="Menu Scraper PRO", page_icon="🍔", layout="wide")
@@ -48,6 +53,33 @@ def apply_price_logic(price, markup_percent, round_up):
     if round_up and final_price > 0:
         final_price = ((final_price + 9) // 10) * 10
     return final_price
+
+# --- SELENIUM HELPER FUNKCIJA ---
+def get_page_source_selenium(url):
+    options = Options()
+    options.add_argument('--headless') # Pokreće se bez grafičkog interfejsa (nevidljivo)
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    # Lažni user-agent da bi izgledali kao pravi korisnik
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    
+    driver = None
+    try:
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(45) # Dajemo mu 45 sekundi maksimum
+        driver.get(url)
+        
+        # Pustimo ga 3 sekunde da izvrši JavaScript (učitavanje cena, zaobilaženje zaštite)
+        time.sleep(3)
+        
+        html_content = driver.page_source
+        driver.quit()
+        return html_content
+    except Exception as e:
+        if driver:
+            driver.quit()
+        raise e
 
 # --- WOLT LOGIKA ---
 def fetch_data(slug):
@@ -112,7 +144,7 @@ def process_all_data(data):
             })
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
-# --- GEMINI AI FUNKCIJA (Rotacija ključeva i ispravljen bug) ---
+# --- GEMINI AI FUNKCIJA ---
 def extract_menu_with_gemini_core(content_to_send, api_keys_list):
     prompt = """Analiziraj priloženi sadržaj (slike, PDF ili tekst sa sajta) i izvuci sva jela i cene.
     Vrati ISKLJUČIVO JSON objekat sa ovom strukturom:
@@ -125,7 +157,6 @@ def extract_menu_with_gemini_core(content_to_send, api_keys_list):
     for idx, key in enumerate(api_keys_list):
         try:
             genai.configure(api_key=key)
-            # OVDE JE ISPRAVLJEN SYNTAX ERROR
             model = genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(full_request)
             clean_json = re.sub(r'```json|```', '', response.text).strip()
@@ -133,7 +164,7 @@ def extract_menu_with_gemini_core(content_to_send, api_keys_list):
         except Exception as e:
             last_error = e
             if idx < len(api_keys_list) - 1:
-                st.warning(f"Ključ {idx+1} je dostigao limit ili grešku. Prebacujem na sledeći...")
+                st.warning(f"Ključ {idx+1} je dostigao limit. Prebacujem na sledeći...")
                 continue
             else: 
                 raise Exception(f"Svi ključevi su blokirani/potrošeni. Poslednja greška: {last_error}")
@@ -178,13 +209,6 @@ def render_menu_preview(df_p, df_g, df_a, ordered_sections):
             for _, p in prods.iterrows():
                 with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                     if p['Description']: st.write(f"_{p['Description']}_")
-                    if 'Attribute_Groups' in p and p['Attribute_Groups']:
-                        g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
-                        for gid in g_ids:
-                            if not df_g.empty:
-                                g_i = df_g[df_g['External_ID'] == gid]
-                                if not g_i.empty:
-                                    st.write(f"└ Opcija: {g_i.iloc[0]['Name']}")
 
 # ============================================================
 # UI TABS
@@ -275,12 +299,12 @@ with tab_photo:
         st.download_button("📊 PREUZMI EXCEL", excel_bytes, f"menu_{st.session_state['ai_name_photo']}.xlsx")
         render_menu_preview(df_p, df_g, df_a, sects)
 
-# --- TAB 3: LINK AI ---
+# --- TAB 3: LINK AI (SELENIUM) ---
 with tab_link_ai:
-    st.subheader("AI Analiza bilo kog linka")
-    st.info("💡 Unesi link web-sajta restorana. Skripta se predstavlja kao pravi korisnik da zaobiđe blokade.")
+    st.subheader("AI Analiza sajta (Selenium Bypass)")
+    st.info("💡 Ovaj mod otvara nevidljivi browser kako bi zaobišao Cloudflare i slične zaštite.")
     
-    link_input_ai = st.text_input("Unesi link sajta:", placeholder="https://www.pleasure.rs/menu/")
+    link_input_ai = st.text_input("Unesi link sajta:", placeholder="https://www.restoranstambolijski.rs/jelovnik/")
     
     col_l1, col_l2 = st.columns(2)
     with col_l1:
@@ -289,31 +313,28 @@ with tab_link_ai:
         markup_l = st.number_input("Uvećaj cene za (%):", min_value=0, max_value=500, value=0, step=5, key="mark_l")
         round_l = st.checkbox("Zaokruži na prvu veću deseticu", key="round_l")
 
-    if st.button("🌐 ANALIZIRAJ LINK", type="primary"):
+    if st.button("🌐 POKRENI SELENIUM ANALIZU", type="primary"):
         keys_for_link = GEMINI_KEYS_LIST if GEMINI_KEYS_LIST else (active_keys if 'active_keys' in locals() else [])
         if link_input_ai and keys_for_link:
-            with st.spinner("Preuzimam stranicu i šaljem Gemini AI modelu..."):
+            with st.spinner("🤖 Pokrećem nevidljivi browser i probijam zaštitu (ovo može trajati do 45 sekundi)..."):
                 try:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                        "Accept-Language": "sr,en-US;q=0.7,en;q=0.3",
-                        "Connection": "keep-alive",
-                        "Upgrade-Insecure-Requests": "1"
-                    }
-                    r = requests.get(link_input_ai, headers=headers, timeout=30)
+                    # 1. SELENIUM PREUZIMANJE KODA
+                    html_content = get_page_source_selenium(link_input_ai)
                     
-                    if r.status_code == 200:
-                        text_only = re.sub('<[^<]+?>', ' ', r.text) 
-                        
-                        content = [f"Ovo je tekstualni sadržaj preuzet sa sajta. Ignoriši bespotrebne stvari i izvuci jelovnik:\n\n {text_only[:20000]}"]
-                        res = extract_menu_with_gemini_core(content, keys_for_link)
-                        
-                        st.session_state['ai_res_link'] = res
-                        st.session_state['ai_name_link'] = rest_name_l if rest_name_l else "Link_Meni"
-                        st.success("✅ Analiza linka uspešna!")
-                    else:
-                        st.error(f"Greška: Sajt je odbio pristup (Statusni kod: {r.status_code})")
+                    # 2. ČIŠĆENJE HTML-a (da olakšamo Gemini-ju posao)
+                    text_only = re.sub('<[^<]+?>', ' ', html_content) 
+                    text_only = re.sub('\s+', ' ', text_only).strip() # Sklanjamo viškove razmaka
+                    
+                    st.info("Sajt učitan! Sada šaljem tekst Gemini AI-ju na čitanje...")
+                    
+                    # 3. SLANJE VEŠTAČKOJ INTELIGENCIJI
+                    content = [f"Ovo je tekstualni sadržaj preuzet sa sajta restorana. Ignoriši bespotrebne stvari (reklame, navigaciju) i izvuci samo jelovnik sa cenama:\n\n {text_only[:25000]}"]
+                    res = extract_menu_with_gemini_core(content, keys_for_link)
+                    
+                    st.session_state['ai_res_link'] = res
+                    st.session_state['ai_name_link'] = rest_name_l if rest_name_l else "Link_Meni"
+                    st.success("✅ Analiza linka uspešna!")
+                    
                 except Exception as e:
                     st.error(f"Došlo je do greške pri konekciji ili analizi: {e}")
         else:
