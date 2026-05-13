@@ -38,7 +38,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🍔 Wolt Menu Scraper")
+st.title("🍔 Menu Scraper")
 
 # --- WOLT HELPER FUNCTIONS ---
 def fetch_data(slug):
