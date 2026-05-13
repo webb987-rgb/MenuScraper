@@ -196,7 +196,7 @@ tab_wolt, tab_photo = st.tabs(["🌐 Wolt Scraper", "📄 Photo/PDF AI Menu"])
 # --- TAB 1: WOLT ---
 with tab_wolt:
     link_input = st.text_input("Paste Wolt link:", placeholder="https://wolt.com/en/srb/...")
-    if st.button("🚀 RUN WOLT"):
+    if st.button("🚀 RUN "):
         match = re.search(r'/(?:restaurant|venue)/([^/]+)', link_input.strip())
         if match:
             slug = match.group(1)
