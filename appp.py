@@ -7,13 +7,7 @@ import re
 import uuid
 import json
 import os
-import time
-import shutil
 import google.generativeai as genai
-
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 
 # 1. Page Configuration
 st.set_page_config(page_title="Menu Scraper PRO", page_icon="🍔", layout="wide")
@@ -54,47 +48,6 @@ def apply_price_logic(price, markup_percent, round_up):
     if round_up and final_price > 0:
         final_price = ((final_price + 9) // 10) * 10
     return final_price
-
-# --- SELENIUM HELPER FUNKCIJA (Optimizovana za Streamlit Cloud) ---
-def get_page_source_selenium(url):
-    options = Options()
-    options.add_argument('--headless') # Nevidljivi mod
-    options.add_argument('--no-sandbox') 
-    options.add_argument('--disable-dev-shm-usage') # NAJVAŽNIJE: Rešava problem sa RAM memorijom
-    options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920x1080')
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-    
-    # 1. 'eager' strategija: Ne čeka da se slike i teški elementi učitaju
-    options.page_load_strategy = 'eager' 
-    
-    # 2. Zabranjujemo Chrome-u da učitava slike (dramatično smanjuje potrošnju RAM-a)
-    prefs = {"profile.managed_default_content_settings.images": 2}
-    options.add_experimental_option("prefs", prefs)
-
-    # 3. Striktne putanje do Chromiuma na Streamlit Cloud-u (rešava grešku 127)
-    chromium_path = shutil.which("chromium") or "/usr/bin/chromium"
-    options.binary_location = chromium_path
-    
-    driver_path = shutil.which("chromedriver") or "/usr/bin/chromedriver"
-    service = Service(driver_path)
-    
-    driver = None
-    try:
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(30) 
-        driver.get(url)
-        
-        # Čekamo 3 sekunde da JavaScript popuni cene na sajtu
-        time.sleep(3)
-        
-        html_content = driver.page_source
-        return html_content
-    except Exception as e:
-        raise e
-    finally:
-        if driver:
-            driver.quit() # Gašenje browsera da ne visi u memoriji
 
 # --- WOLT LOGIKA ---
 def fetch_data(slug):
@@ -179,7 +132,7 @@ def extract_menu_with_gemini_core(content_to_send, api_keys_list):
         except Exception as e:
             last_error = e
             if idx < len(api_keys_list) - 1:
-                st.warning(f"Ključ {idx+1} je dostigao limit ili grešku. Prebacujem na sledeći...")
+                st.warning(f"Ključ {idx+1} je dostigao limit. Prebacujem na sledeći...")
                 continue
             else: 
                 raise Exception(f"Svi ključevi su blokirani/potrošeni. Poslednja greška: {last_error}")
@@ -321,10 +274,10 @@ with tab_photo:
         st.download_button("📊 PREUZMI EXCEL", excel_bytes, f"menu_{st.session_state['ai_name_photo']}.xlsx")
         render_menu_preview(df_p, df_g, df_a, sects)
 
-# --- TAB 3: LINK AI (SELENIUM) ---
+# --- TAB 3: LINK AI (SA JINA READER TRIKOM) ---
 with tab_link_ai:
-    st.subheader("AI Analiza sajta (Selenium Bypass)")
-    st.info("💡 Ovaj mod otvara nevidljivi browser kako bi zaobišao Cloudflare i slične zaštite.")
+    st.subheader("AI Analiza sajta (Cloud API Trik)")
+    st.info("💡 Koristimo eksterne servere da pročitamo sajt bez pucanja Streamlit memorije!")
     
     link_input_ai = st.text_input("Unesi link sajta:", placeholder="https://www.restoranstambolijski.rs/jelovnik/")
     
@@ -335,28 +288,37 @@ with tab_link_ai:
         markup_l = st.number_input("Uvećaj cene za (%):", min_value=0, max_value=500, value=0, step=5, key="mark_l")
         round_l = st.checkbox("Zaokruži na prvu veću deseticu", key="round_l_2")
 
-    if st.button("🌐 POKRENI SELENIUM ANALIZU", type="primary"):
+    if st.button("🌐 ANALIZIRAJ LINK", type="primary"):
         keys_for_link = GEMINI_KEYS_LIST if GEMINI_KEYS_LIST else (active_keys if 'active_keys' in locals() else [])
         if link_input_ai and keys_for_link:
-            with st.spinner("🤖 Pokrećem nevidljivi browser i probijam zaštitu..."):
+            with st.spinner("🤖 Šaljem link moćnim cloud serverima na čitanje..."):
                 try:
-                    # 1. SELENIUM PREUZIMANJE KODA
-                    html_content = get_page_source_selenium(link_input_ai)
+                    # MAGIJA: Koristimo Jina Reader API koji za nas renderuje stranicu
+                    # i vraća čist markdown tekst (probija Cloudflare i ne troši naš RAM!)
+                    jina_url = f"https://r.jina.ai/{link_input_ai}"
                     
-                    # 2. ČIŠĆENJE HTML-a (da olakšamo Gemini-ju posao)
-                    text_only = re.sub('<[^<]+?>', ' ', html_content) 
-                    text_only = re.sub(r'\s+', ' ', text_only).strip() 
+                    headers = {"Accept": "application/json"} 
+                    r = requests.get(jina_url, headers=headers, timeout=45)
                     
-                    st.info("Sajt učitan! Sada šaljem tekst Gemini AI-ju na čitanje...")
-                    
-                    # 3. SLANJE VEŠTAČKOJ INTELIGENCIJI
-                    content = [f"Ovo je tekstualni sadržaj preuzet sa sajta restorana. Ignoriši bespotrebne stvari (reklame, navigaciju) i izvuci samo jelovnik sa cenama:\n\n {text_only[:25000]}"]
-                    res = extract_menu_with_gemini_core(content, keys_for_link)
-                    
-                    st.session_state['ai_res_link'] = res
-                    st.session_state['ai_name_link'] = rest_name_l if rest_name_l else "Link_Meni"
-                    st.success("✅ Analiza linka uspešna!")
-                    
+                    if r.status_code == 200:
+                        data = r.json()
+                        text_only = data.get("data", {}).get("content", "")
+                        
+                        if not text_only:
+                            st.warning("Upeo sam da učitam sajt, ali nisam našao tekst. Možda je ceo sajt napravljen od slika.")
+                        else:
+                            st.info("Sajt pročišćen! Sada šaljem jelovnik Gemini AI-ju na čitanje...")
+                            
+                            # 3. SLANJE VEŠTAČKOJ INTELIGENCIJI
+                            content = [f"Ovo je čist tekstualni sadržaj preuzet sa sajta restorana. Ignoriši bespotrebne stvari (reklame, navigaciju) i izvuci samo jelovnik sa cenama:\n\n {text_only[:35000]}"]
+                            res = extract_menu_with_gemini_core(content, keys_for_link)
+                            
+                            st.session_state['ai_res_link'] = res
+                            st.session_state['ai_name_link'] = rest_name_l if rest_name_l else "Link_Meni"
+                            st.success("✅ Analiza linka uspešna!")
+                    else:
+                        st.error(f"Eksterni server nije uspeo da učita sajt (Greška: {r.status_code})")
+                        
                 except Exception as e:
                     st.error(f"Došlo je do greške pri konekciji ili analizi: {e}")
         else:
