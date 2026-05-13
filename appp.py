@@ -5,7 +5,6 @@ import io
 import zipfile
 import re
 import uuid
-import base64
 import json
 import os
 import google.generativeai as genai
@@ -130,11 +129,9 @@ def process_all_data(data):
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections
 
 # --- PHOTO MENU: GEMINI AI FUNCTIONS ---
-
 def extract_menu_with_gemini(uploaded_files, api_key):
-    """Slanje slika na Gemini AI."""
     genai.configure(api_key=api_key)
-    # Koristimo stabilno ime modela. Verzija biblioteke 0.7.0+ će ovo mapirati na v1 API.
+    # Ovaj deo ćemo promeniti nakon što nam DEBUG kaže pravo ime
     model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = """Analiziraj priložene slike jelovnika i izvuci sva jela i cene.
@@ -165,8 +162,6 @@ def extract_menu_with_gemini(uploaded_files, api_key):
     
     response = model.generate_content(content)
     text_response = response.text
-    
-    # Čišćenje JSON-a (uklanjanje backticks ako ih AI doda)
     clean_json = re.sub(r'```json|```', '', text_response).strip()
     return json.loads(clean_json)
 
@@ -215,7 +210,6 @@ def render_menu_preview(df_p, df_g, df_a, ordered_sections):
             for _, p in prods.iterrows():
                 with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
                     if p['Description']: st.write(f"_{p['Description']}_")
-                    # Prikaz atributa (Wolt tab)
                     g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
                     for gid in g_ids:
                         if not df_g.empty:
@@ -266,11 +260,32 @@ with tab_wolt:
         
         render_menu_preview(st.session_state['df_p'], st.session_state['df_g'], st.session_state['df_a'], st.session_state['ordered_sections'])
 
+
 with tab_photo:
     st.markdown("### 📷 AI Photo Extraction")
-    # API Key check
+    
     active_key = GEMINI_KEY if GEMINI_KEY else st.text_input("Gemini API Key:", type="password")
     if not active_key: st.warning("⚠️ API ključ nije podešen.")
+    
+    # --- POČETAK DEBUG BLOKA ---
+    st.markdown("---")
+    if st.button("🛠️ DEBUG: Koji modeli su mi dostupni?"):
+        if active_key:
+            with st.spinner("Pitam Google API..."):
+                try:
+                    genai.configure(api_key=active_key)
+                    dostupni_modeli = []
+                    for m in genai.list_models():
+                        if 'generateContent' in m.supported_generation_methods:
+                            dostupni_modeli.append(m.name)
+                    st.success("Ovo su modeli koje tvoj API ključ vidi:")
+                    st.write(dostupni_modeli)
+                except Exception as e:
+                    st.error(f"Greška pri dobavljanju liste modela: {e}")
+        else:
+            st.error("Nema API ključa. Molim te dodaj ga prvo.")
+    st.markdown("---")
+    # --- KRAJ DEBUG BLOKA ---
     
     rest_name = st.text_input("Naziv restorana:", placeholder="npr. La Piazza")
     uploaded_images = st.file_uploader("Uploaduj slike:", type=["jpg", "png", "webp"], accept_multiple_files=True)
