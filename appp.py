@@ -14,10 +14,8 @@ st.set_page_config(page_title="Wolt Scraper - PRO", page_icon="🍔", layout="wi
 
 # --- BEZBEDNO UČITAVANJE API KLJUČA ---
 def get_gemini_key():
-    # 1. Gledaj Streamlit Secrets (za server)
     if "GEMINI_API_KEY" in st.secrets:
         return st.secrets["GEMINI_API_KEY"]
-    # 2. Gledaj lokalni config.json (za lokalni rad)
     try:
         if os.path.exists("config.json"):
             with open("config.json", "r") as f:
@@ -41,7 +39,7 @@ st.markdown("""
 
 st.title("🍔 Wolt Menu Scraper")
 
-# --- HELPER FUNCTIONS (Originalni Wolt kod) ---
+# --- WOLT HELPER FUNCTIONS ---
 def fetch_data(slug):
     api_url = f"https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/{slug}/assortment"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -131,8 +129,9 @@ def process_all_data(data):
 # --- PHOTO MENU: GEMINI AI FUNCTIONS ---
 def extract_menu_with_gemini(uploaded_files, api_key):
     genai.configure(api_key=api_key)
-    # Ovaj deo ćemo promeniti nakon što nam DEBUG kaže pravo ime
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # KORISTIMO TAČAN MODEL KOJI TVOJ NALOG PODRŽAVA
+    model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = """Analiziraj priložene slike jelovnika i izvuci sva jela i cene.
     Vrati isključivo JSON objekat sa ovom strukturom:
@@ -150,7 +149,7 @@ def extract_menu_with_gemini(uploaded_files, api_key):
         }
       ]
     }
-    Pravila: Cene moraju biti celi brojevi u RSD. Ako nema opisa, ostavi prazan string. Vrati samo JSON."""
+    Pravila: Cene moraju biti celi brojevi u RSD. Ako nema opisa, ostavi prazan string. Vrati samo sirov JSON."""
 
     content = []
     for uf in uploaded_files:
@@ -162,6 +161,8 @@ def extract_menu_with_gemini(uploaded_files, api_key):
     
     response = model.generate_content(content)
     text_response = response.text
+    
+    # Očisti odgovor da osiguraš validan JSON
     clean_json = re.sub(r'```json|```', '', text_response).strip()
     return json.loads(clean_json)
 
@@ -267,38 +268,18 @@ with tab_photo:
     active_key = GEMINI_KEY if GEMINI_KEY else st.text_input("Gemini API Key:", type="password")
     if not active_key: st.warning("⚠️ API ključ nije podešen.")
     
-    # --- POČETAK DEBUG BLOKA ---
-    st.markdown("---")
-    if st.button("🛠️ DEBUG: Koji modeli su mi dostupni?"):
-        if active_key:
-            with st.spinner("Pitam Google API..."):
-                try:
-                    genai.configure(api_key=active_key)
-                    dostupni_modeli = []
-                    for m in genai.list_models():
-                        if 'generateContent' in m.supported_generation_methods:
-                            dostupni_modeli.append(m.name)
-                    st.success("Ovo su modeli koje tvoj API ključ vidi:")
-                    st.write(dostupni_modeli)
-                except Exception as e:
-                    st.error(f"Greška pri dobavljanju liste modela: {e}")
-        else:
-            st.error("Nema API ključa. Molim te dodaj ga prvo.")
-    st.markdown("---")
-    # --- KRAJ DEBUG BLOKA ---
-    
     rest_name = st.text_input("Naziv restorana:", placeholder="npr. La Piazza")
     uploaded_images = st.file_uploader("Uploaduj slike:", type=["jpg", "png", "webp"], accept_multiple_files=True)
     
     if st.button("🤖 ANALIZIRAJ JELOVNIK", type="primary"):
         if active_key and uploaded_images:
-            with st.spinner("AI analizira slike..."):
+            with st.spinner("Gemini 2.5 Flash analizira slike..."):
                 try:
                     menu_json = extract_menu_with_gemini(uploaded_images, active_key)
                     p, g, a, o = build_dataframes_from_photo(menu_json)
                     st.session_state['p_df_p'], st.session_state['p_df_g'], st.session_state['p_df_a'] = p, g, a
                     st.session_state['p_ordered_sections'], st.session_state['p_slug'] = o, rest_name
-                    st.success("Gotovo!")
+                    st.success("Gotovo! Uspešno izvučeno.")
                 except Exception as e: st.error(f"Greška: {e}")
 
     if 'p_df_p' in st.session_state:
