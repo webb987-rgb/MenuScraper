@@ -195,6 +195,22 @@ def build_excel(df_p, df_g, df_a):
             df_a.to_excel(w, index=False, sheet_name='Attributes')
     return out.getvalue()
 
+def render_menu_preview(df_p, df_g, df_a, ordered_sections):
+    for s in ordered_sections:
+        prods = df_p[df_p['Section'] == s]
+        if not prods.empty:
+            st.markdown(f"**{s}**")
+            for _, p in prods.iterrows():
+                with st.expander(f"{p['Product_Name']} — {p['Price']} RSD"):
+                    if p['Description']: st.write(f"_{p['Description']}_")
+                    if 'Attribute_Groups' in p and p['Attribute_Groups']:
+                        g_ids = [gid for gid in str(p['Attribute_Groups']).split(",") if gid]
+                        for gid in g_ids:
+                            if not df_g.empty:
+                                g_i = df_g[df_g['External_ID'] == gid]
+                                if not g_i.empty:
+                                    st.write(f"└ Opcija: {g_i.iloc[0]['Name']}")
+
 # ============================================================
 # UI TABS
 # ============================================================
@@ -215,8 +231,9 @@ with tab_wolt:
                 st.success(f"Uspešno učitano: {slug}")
 
     if 'w_df_p' in st.session_state:
-        st.markdown("### 📊 Pregled tabele")
-        st.dataframe(st.session_state['w_df_p'], use_container_width=True)
+        # NOVO: Expander dugme za pregled cele tabele
+        with st.expander("👀 KLIKNI ZA PREGLED CELE TABELE"):
+            st.dataframe(st.session_state['w_df_p'], height=600, use_container_width=True)
         
         st.markdown("### 📥 Download")
         col_ex, col_zip, _ = st.columns([1, 1.2, 4])
@@ -275,8 +292,10 @@ with tab_photo:
 
     if 'ai_res_photo' in st.session_state:
         df_p, df_g, df_a, sects = build_dataframes_from_ai(st.session_state['ai_res_photo'], markup_p, fixed_p, round_p)
-        st.markdown("### 📊 Pregled generisane tabele")
-        st.dataframe(df_p, use_container_width=True)
+        # NOVO: Expander dugme
+        with st.expander("👀 KLIKNI ZA PREGLED CELE TABELE"):
+            st.dataframe(df_p, height=600, use_container_width=True)
+        
         st.download_button("📊 PREUZMI EXCEL", build_excel(df_p, df_g, df_a), f"menu_{st.session_state['ai_name_photo']}.xlsx")
 
 # --- TAB 3: LINK AI ---
@@ -308,8 +327,10 @@ with tab_link_ai:
 
     if 'ai_res_link' in st.session_state:
         df_l, df_gl, df_al, sects_l = build_dataframes_from_ai(st.session_state['ai_res_link'], markup_l, fixed_l, round_l)
-        st.markdown("### 📊 Pregled generisane tabele")
-        st.dataframe(df_l, use_container_width=True)
+        # NOVO: Expander dugme
+        with st.expander("👀 KLIKNI ZA PREGLED CELE TABELE"):
+            st.dataframe(df_l, height=600, use_container_width=True)
+            
         st.download_button("📊 PREUZMI EXCEL", build_excel(df_l, df_gl, df_al), f"menu_{st.session_state['ai_name_link']}_link.xlsx")
 
 # --- TAB 4: UVEĆANJE CENA (IZMENJEN NAZIV) ---
@@ -324,8 +345,9 @@ with tab_edit:
             df_g_edit = sheets.get('Attribute Groups', pd.DataFrame())
             df_a_edit = sheets.get('Attributes', pd.DataFrame())
             
-            st.markdown("### 📊 Pregled učitane tabele")
-            st.dataframe(df_p_edit, use_container_width=True)
+            # NOVO: Expander za originalnu tabelu
+            with st.expander("👀 KLIKNI ZA PREGLED UČITANE TABELE"):
+                st.dataframe(df_p_edit, height=600, use_container_width=True)
             
             st.markdown("---")
             col_e1, col_e2 = st.columns(2)
@@ -340,7 +362,6 @@ with tab_edit:
             round_edit = st.checkbox("Zaokruži nove cene na 10 RSD", value=False, key="re")
             
             if st.button("🔄 PRERAČUNAJ", type="primary"):
-                # Kreiramo kopije za obradu da ne menjamo preview odmah
                 res_p = df_p_edit.copy()
                 res_a = df_a_edit.copy()
                 if not res_p.empty and 'Price' in res_p.columns:
@@ -348,13 +369,17 @@ with tab_edit:
                 if not res_a.empty and 'Price' in res_a.columns:
                     res_a['Price'] = res_a['Price'].apply(lambda x: apply_price_logic(x, mark_a_edit, fix_a_edit, round_edit))
                 
-                st.markdown("### 📊 Pregled novih cena")
-                st.dataframe(res_p, use_container_width=True)
-                
+                # Snimamo i rezultujući DataFrame u state da se ne izgubi
                 st.session_state['edited_excel'] = build_excel(res_p, df_g_edit, res_a)
+                st.session_state['edited_df_p'] = res_p
                 st.success("Cene su preračunate!")
 
-            if 'edited_excel' in st.session_state:
+            # Dugme za skidanje i pregled novih cena ostaju vidljivi i nakon klika na expander
+            if 'edited_excel' in st.session_state and 'edited_df_p' in st.session_state:
+                with st.expander("👀 KLIKNI ZA PREGLED NOVIH CENA", expanded=True):
+                    st.dataframe(st.session_state['edited_df_p'], height=600, use_container_width=True)
+                    
                 st.download_button("📥 PREUZMI AZURIRAN EXCEL", st.session_state['edited_excel'], "azuriran_cenovnik.xlsx")
+                
         except Exception as e:
             st.error(f"Greška: {e}")
