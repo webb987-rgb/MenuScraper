@@ -44,14 +44,10 @@ st.title("🍔 Menu Scraper PRO")
 
 # --- HELPER: Primena marže, fiksnog iznosa i zaokruživanja ---
 def apply_price_logic(price, markup_percent, fixed_amount, round_up):
-    # 1. Prvo primeni procenat
     new_price = price * (1 + markup_percent / 100)
-    # 2. Dodaj fiksni iznos
     new_price += fixed_amount
-    
     final_price = int(new_price)
     
-    # 3. Zaokruži na deseticu ako je traženo
     if round_up and final_price > 0:
         final_price = ((final_price + 9) // 10) * 10
     return final_price
@@ -151,7 +147,6 @@ def build_dataframes_from_ai(menu_data, markup, fixed_amount, round_up):
         sec_name = section.get("name", "Ostalo").strip()
         if sec_name not in ordered_sections: ordered_sections.append(sec_name)
         for item in section.get("items", []):
-            # Primenjujemo novu logiku sa fiksnom cenom
             p = apply_price_logic(item.get("price", 0), markup, fixed_amount, round_up)
             items_list.append({
                 "External_ID": str(uuid.uuid4()), "Product_Name": str(item.get("name", "")).strip(),
@@ -171,8 +166,9 @@ def build_excel(df_p, df_g, df_a):
     with pd.ExcelWriter(out, engine='openpyxl') as w:
         df_p.to_excel(w, index=False, sheet_name='Products')
         df_g.to_excel(w, index=False, sheet_name='Attribute Groups')
-        if not df_a.empty and 'Group_ID_Internal' in df_a.columns:
-            df_a.drop(columns=['Group_ID_Internal']).to_excel(w, index=False, sheet_name='Attributes')
+        if not df_a.empty:
+            cols_to_save = [c for c in df_a.columns if c != 'Group_ID_Internal']
+            df_a[cols_to_save].to_excel(w, index=False, sheet_name='Attributes')
         else:
             df_a.to_excel(w, index=False, sheet_name='Attributes')
     return out.getvalue()
@@ -189,12 +185,14 @@ def render_menu_preview(df_p, df_g, df_a, ordered_sections):
 # ============================================================
 # UI TABS
 # ============================================================
-tab_wolt, tab_photo, tab_link_ai = st.tabs(["🌐 Wolt Scraper", "📄 Photo/PDF AI Menu", "🔗 Link AI Menu"])
+tab_wolt, tab_photo, tab_link_ai, tab_edit = st.tabs(["🌐 Wolt Scraper", "📄 Photo/PDF AI Menu", "🔗 Link AI Menu", "🛠️ Izmena Excela"])
 
 # --- TAB 1: WOLT ---
 with tab_wolt:
     link_input = st.text_input("Paste Wolt link:", placeholder="https://wolt.com/en/srb/...")
-    if st.button("🚀 RUN WOLT"):
+    
+    # Preimenovano dugme po tvom zahtevu
+    if st.button("🚀 RUN"):
         match = re.search(r'/(?:restaurant|venue)/([^/]+)', link_input.strip())
         if match:
             slug = match.group(1)
@@ -205,30 +203,45 @@ with tab_wolt:
                 st.session_state['w_ordered_sections'], st.session_state['w_slug'] = o_s, slug
                 st.success(f"Uspešno učitano: {slug}")
 
+    # VRAĆENA LOGIKA ZA PREUZIMANJE SLIKA
     if 'w_df_p' in st.session_state:
-        excel_bytes = build_excel(st.session_state['w_df_p'], st.session_state['w_df_g'], st.session_state['w_df_a'])
-        st.download_button("📊 PREUZMI EXCEL", excel_bytes, f"wolt_menu_{st.session_state['w_slug']}.xlsx")
+        st.markdown("### 📥 Download")
+        col_ex, col_zip, _ = st.columns([1, 1.2, 4])
+        
+        with col_ex:
+            excel_bytes = build_excel(st.session_state['w_df_p'], st.session_state['w_df_g'], st.session_state['w_df_a'])
+            st.download_button("📊 EXCEL", excel_bytes, f"wolt_menu_{st.session_state['w_slug']}.xlsx")
+        
+        with col_zip:
+            if st.button("🖼️ DOWNLOAD PICTURES"):
+                img_df = st.session_state['w_df_p'][st.session_state['w_df_p']['Image_1'] != ""]
+                z_io = io.BytesIO()
+                with zipfile.ZipFile(z_io, "w") as zf:
+                    for _, r in img_df.iterrows():
+                        try:
+                            res = requests.get(r['Image_1'], timeout=10)
+                            name = re.sub(r'[^\w\s-]', '', r['Product_Name']).strip().replace(' ', '_')
+                            zf.writestr(f"{name}.jpg", res.content)
+                        except: continue
+                st.session_state['zip_ready'] = z_io.getvalue()
+            
+            if 'zip_ready' in st.session_state:
+                st.download_button("🔥 SAVE ZIP FILE", st.session_state['zip_ready'], f"images_{st.session_state['w_slug']}.zip")
+        
         render_menu_preview(st.session_state['w_df_p'], st.session_state['w_df_g'], st.session_state['w_df_a'], st.session_state['w_ordered_sections'])
 
 # --- TAB 2: PHOTO/PDF AI ---
 with tab_photo:
     st.subheader("AI Analiza slika i PDF dokumenata")
     
-    if not GEMINI_KEYS_LIST:
-        manual_keys = st.text_input("API Ključevi (zarezom odvojeni):", type="password")
-        active_keys = [k.strip() for k in manual_keys.split(",")] if manual_keys else []
-    else:
-        active_keys = GEMINI_KEYS_LIST
+    active_keys = GEMINI_KEYS_LIST if GEMINI_KEYS_LIST else [st.text_input("API Ključ:", type="password")]
 
     col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-    with col1:
-        rest_name_p = st.text_input("Naziv restorana:", key="rest_p")
-    with col2:
-        markup_p = st.number_input("Uvećaj %:", min_value=0, max_value=500, value=0, step=5, key="mark_p")
-    with col3:
-        fixed_p = st.number_input("Fiksno + (RSD):", min_value=0, value=0, step=10, key="fix_p")
-    with col4:
-        st.write("") # Poravnanje
+    with col1: rest_name_p = st.text_input("Naziv restorana:", key="rest_p")
+    with col2: markup_p = st.number_input("Uvećaj %:", min_value=0, value=0, step=5, key="mark_p")
+    with col3: fixed_p = st.number_input("Fiksno + (RSD):", min_value=0, value=0, step=10, key="fix_p")
+    with col4: 
+        st.write("")
         round_p = st.checkbox("Zaokruži 10", key="round_p_1")
         
     files = st.file_uploader("Uploaduj Slike/PDF:", type=["jpg","jpeg","png","webp","pdf"], accept_multiple_files=True)
@@ -257,33 +270,78 @@ with tab_link_ai:
     link_input_ai = st.text_input("Unesi link sajta:", placeholder="https://www.restoran.rs/jelovnik/")
     
     col_l1, col_l2, col_l3, col_l4 = st.columns([2, 1, 1, 1])
-    with col_l1:
-        rest_name_l = st.text_input("Naziv restorana:", key="rest_l")
-    with col_l2:
-        markup_l = st.number_input("Uvećaj %:", min_value=0, max_value=500, value=0, step=5, key="mark_l")
-    with col_l3:
-        fixed_l = st.number_input("Fiksno + (RSD):", min_value=0, value=0, step=10, key="fix_l")
+    with col_l1: rest_name_l = st.text_input("Naziv restorana:", key="rest_l")
+    with col_l2: markup_l = st.number_input("Uvećaj %:", min_value=0, value=0, step=5, key="mark_l")
+    with col_l3: fixed_l = st.number_input("Fiksno + (RSD):", min_value=0, value=0, step=10, key="fix_l")
     with col_l4:
-        st.write("") # Poravnanje
+        st.write("")
         round_l = st.checkbox("Zaokruži 10", key="round_l_2")
 
     if st.button("🌐 ANALIZIRAJ LINK", type="primary"):
-        keys_for_link = GEMINI_KEYS_LIST if GEMINI_KEYS_LIST else (active_keys if 'active_keys' in locals() else [])
-        if link_input_ai and keys_for_link:
-            with st.spinner("🤖 Čitam sajt preko Clouda..."):
+        if link_input_ai and GEMINI_KEYS_LIST:
+            with st.spinner("🤖 Čitam sajt..."):
                 try:
                     jina_url = f"https://r.jina.ai/{link_input_ai}"
                     r = requests.get(jina_url, headers={"Accept": "application/json"}, timeout=45)
                     if r.status_code == 200:
                         text_only = r.json().get("data", {}).get("content", "")
-                        content = [f"Ovo je tekst sa sajta. Izvuci jelovnik sa cenama:\n\n {text_only[:35000]}"]
-                        res = extract_menu_with_gemini_core(content, keys_for_link)
+                        content = [f"Ovo je tekst sa sajta. Izvuci jelovnik:\n\n {text_only[:35000]}"]
+                        res = extract_menu_with_gemini_core(content, GEMINI_KEYS_LIST)
                         st.session_state['ai_res_link'] = res
                         st.session_state['ai_name_link'] = rest_name_l if rest_name_l else "Link_Meni"
-                        st.success("✅ Uspešno!")
                 except Exception as e: st.error(f"Greška: {e}")
 
     if 'ai_res_link' in st.session_state:
         df_l, df_gl, df_al, sects_l = build_dataframes_from_ai(st.session_state['ai_res_link'], markup_l, fixed_l, round_l)
         st.download_button("📊 PREUZMI EXCEL", build_excel(df_l, df_gl, df_al), f"menu_{st.session_state['ai_name_link']}_link.xlsx")
         render_menu_preview(df_l, df_gl, df_al, sects_l)
+
+# --- TAB 4: IZMENA POSTOJEĆEG EXCELA ---
+with tab_edit:
+    st.subheader("🛠️ Masovna izmena cena u Excelu")
+    st.info("💡 Ovde možeš učitati prethodno generisan Excel fajl i masovno mu promeniti cene za proizvode i atribute odvojeno.")
+    
+    uploaded_edit_file = st.file_uploader("Uploaduj Excel fajl (.xlsx):", type=["xlsx"], key="edit_uploader")
+    
+    if uploaded_edit_file:
+        try:
+            sheets = pd.read_excel(uploaded_edit_file, sheet_name=None)
+            df_p_edit = sheets.get('Products', pd.DataFrame())
+            df_g_edit = sheets.get('Attribute Groups', pd.DataFrame())
+            df_a_edit = sheets.get('Attributes', pd.DataFrame())
+            
+            st.markdown("---")
+            col_e1, col_e2 = st.columns(2)
+            
+            with col_e1:
+                st.markdown("### 🍔 Glavna Jela (Products)")
+                mark_p_edit = st.number_input("Products: Uvećaj %:", min_value=0, value=0, step=5, key="mpe")
+                fix_p_edit = st.number_input("Products: Fiksno + (RSD):", min_value=0, value=0, step=10, key="fpe")
+            
+            with col_e2:
+                st.markdown("### 🧩 Dodaci (Attributes)")
+                mark_a_edit = st.number_input("Attributes: Uvećaj %:", min_value=0, value=0, step=5, key="mae")
+                fix_a_edit = st.number_input("Attributes: Fiksno + (RSD):", min_value=0, value=0, step=10, key="fae")
+                
+            round_edit = st.checkbox("Zaokruži sve nove cene na 10 RSD", value=True, key="re")
+            
+            if st.button("🔄 PRERAČUNAJ I PRIPREMI ZA DOWNLOAD", type="primary"):
+                if not df_p_edit.empty and 'Price' in df_p_edit.columns:
+                    df_p_edit['Price'] = df_p_edit['Price'].apply(lambda x: apply_price_logic(x, mark_p_edit, fix_p_edit, round_edit))
+                
+                if not df_a_edit.empty and 'Price' in df_a_edit.columns:
+                    df_a_edit['Price'] = df_a_edit['Price'].apply(lambda x: apply_price_logic(x, mark_a_edit, fix_a_edit, round_edit))
+                
+                st.session_state['edited_excel'] = build_excel(df_p_edit, df_g_edit, df_a_edit)
+                st.success("Cene su uspešno ažurirane!")
+
+            if 'edited_excel' in st.session_state:
+                st.download_button(
+                    label="📥 PREUZMI IZMENJENI EXCEL",
+                    data=st.session_state['edited_excel'],
+                    file_name="azuriran_cenovnik.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                
+        except Exception as e:
+            st.error(f"Greška pri čitanju fajla: {e}")
