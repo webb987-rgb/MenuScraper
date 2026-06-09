@@ -219,7 +219,7 @@ Every dish name from the input must appear as a key in the output. Return only r
     for idx, key in enumerate(api_keys_list):
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model = genai.GenerativeModel("gemini-1.5-flash")
             response = model.generate_content(prompt, generation_config={"max_output_tokens": 8192})
             raw = response.text.strip()
             # Ukloni markdown backticks
