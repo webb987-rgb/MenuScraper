@@ -58,7 +58,6 @@ def apply_price_logic(price, markup_percent, fixed_amount, round_up, curr):
             final_price = ((final_price + 9) // 10) * 10
         return final_price
     else:
-        # Keep 2 decimal places for EUR, rounding to 10 does not apply
         return round(new_price, 2)
 
 # --- HELPER: HIGH-SPEED IMAGE DOWNLOAD ---
@@ -103,7 +102,6 @@ def process_all_data(data, curr):
             new_aid = str(uuid.uuid4())
             a_ids.append(new_aid)
             
-            # Adjust attribute price format based on selected currency
             attr_price = val.get("price", 0) / 100
             attr_price = int(attr_price) if curr == "RSD" else round(attr_price, 2)
             
@@ -128,7 +126,6 @@ def process_all_data(data, curr):
             seen_ids.add(w_id)
             new_iid = str(uuid.uuid4())
             
-            # Adjust product price format based on selected currency
             raw_price = (item.get("base_price") or item.get("price") or 0) / 100
             puna_cena = int(raw_price) if curr == "RSD" else round(raw_price, 2)
             
@@ -184,6 +181,56 @@ def extract_menu_with_gemini_core(content_to_send, api_keys_list, curr):
             else: 
                 raise Exception(f"All API keys are blocked or exhausted. Last error: {last_error}")
 
+# --- AI DESCRIPTION GENERATOR FUNCTION ---
+def generate_descriptions_batch(product_names, api_keys_list, language, desc_length):
+    length_map = {
+        "Kratko (1 rečenica)": "1 short sentence, max 15 words",
+        "Srednje (2-3 rečenice)": "2-3 sentences, max 50 words",
+        "Dugo (4-5 rečenica)": "4-5 sentences, max 100 words"
+    }
+    length_instruction = length_map.get(desc_length, "2-3 sentences, max 50 words")
+
+    if language == "Srpski":
+        lang_instruction = "Write all descriptions in Serbian language (Latin script)."
+    elif language == "Bosanski":
+        lang_instruction = "Write all descriptions in Bosnian language (Latin script)."
+    elif language == "Hrvatski":
+        lang_instruction = "Write all descriptions in Croatian language."
+    else:
+        lang_instruction = "Write all descriptions in English."
+
+    items_json = json.dumps(product_names, ensure_ascii=False)
+
+    prompt = f"""You are a professional food copywriter for restaurant menus.
+{lang_instruction}
+For each dish name in the list below, write an appealing and appetizing description.
+Description length: {length_instruction}.
+Be creative, use sensory language (taste, smell, texture). Do NOT invent ingredients that are not typical for the dish.
+
+Input list (JSON array of dish names):
+{items_json}
+
+Return EXCLUSIVELY a JSON object in this exact format (no markdown, no explanation):
+{{"descriptions": {{"DISH_NAME": "description text", ...}}}}
+
+Every dish name from the input must appear as a key in the output. Return only raw JSON."""
+
+    last_error = None
+    for idx, key in enumerate(api_keys_list):
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            response = model.generate_content(prompt)
+            clean_json = re.sub(r'```json|```', '', response.text).strip()
+            return json.loads(clean_json)
+        except Exception as e:
+            last_error = e
+            if idx < len(api_keys_list) - 1:
+                st.warning(f"Key {idx+1} reached its limit. Switching to the next key...")
+                continue
+            else:
+                raise Exception(f"All API keys are blocked or exhausted. Last error: {last_error}")
+
 # --- TABLE DATA GENERATION HELPERS ---
 def build_dataframes_from_ai(menu_data, markup, fixed_amount, round_up, curr):
     items_list, ordered_sections = [], []
@@ -235,7 +282,9 @@ def render_menu_preview(df_p, df_g, df_a, ordered_sections, curr):
 # ============================================================
 # UI TABS CONFIGURATION
 # ============================================================
-tab_wolt, tab_photo, tab_link_ai, tab_edit = st.tabs(["🌐 Wolt Scraper", "📄 Photo/PDF AI Menu", "🔗 Link AI Menu", "📈 Price Markup"])
+tab_wolt, tab_photo, tab_link_ai, tab_edit, tab_desc = st.tabs([
+    "🌐 Wolt Scraper", "📄 Photo/PDF AI Menu", "🔗 Link AI Menu", "📈 Price Markup", "✍️ AI Opisi"
+])
 
 # --- TAB 1: WOLT SCRAPER ---
 with tab_wolt:
@@ -401,3 +450,132 @@ with tab_edit:
                 
         except Exception as e:
             st.error(f"Error: {e}")
+
+# --- TAB 5: AI OPISI ---
+with tab_desc:
+    st.subheader("✍️ AI Generator Opisa Jela")
+    st.info("💡 Uploaduj Excel fajl sa menijem. AI će automatski generisati apetitne opise za sva jela i snimiti ih nazad u fajl.", icon="ℹ️")
+
+    uploaded_desc_file = st.file_uploader("Upload Excel fajl (.xlsx):", type=["xlsx"], key="desc_uploader")
+
+    if uploaded_desc_file:
+        try:
+            sheets_desc = pd.read_excel(uploaded_desc_file, sheet_name=None)
+            df_desc = sheets_desc.get('Products', pd.DataFrame()).copy()
+            df_desc_g = sheets_desc.get('Attribute Groups', pd.DataFrame())
+            df_desc_a = sheets_desc.get('Attributes', pd.DataFrame())
+
+            if df_desc.empty or 'Product_Name' not in df_desc.columns:
+                st.error("Fajl ne sadrži 'Products' sheet sa kolonom 'Product_Name'.")
+            else:
+                total_items = len(df_desc)
+                st.success(f"✅ Učitano {total_items} jela iz menija.")
+
+                with st.expander("👀 POGLEDAJ UČITANU TABELU"):
+                    st.dataframe(df_desc, height=400, use_container_width=True)
+
+                st.markdown("---")
+                col_d1, col_d2, col_d3 = st.columns(3)
+                with col_d1:
+                    desc_language = st.selectbox(
+                        "Jezik opisa:",
+                        ["Srpski", "Bosanski", "Hrvatski", "English"],
+                        key="desc_lang"
+                    )
+                with col_d2:
+                    desc_length = st.selectbox(
+                        "Dužina opisa:",
+                        ["Kratko (1 rečenica)", "Srednje (2-3 rečenice)", "Dugo (4-5 rečenica)"],
+                        index=1,
+                        key="desc_length"
+                    )
+                with col_d3:
+                    overwrite_existing = st.checkbox(
+                        "Prepiši postojeće opise",
+                        value=False,
+                        help="Ako je čekirano, AI će generisati opise i za jela koja već imaju opis.",
+                        key="desc_overwrite"
+                    )
+
+                # Prikaz broja jela koja će biti obrađena
+                if 'Description' in df_desc.columns and not overwrite_existing:
+                    items_without_desc = df_desc[
+                        df_desc['Description'].isna() | (df_desc['Description'].astype(str).str.strip() == '')
+                    ]
+                    to_process_count = len(items_without_desc)
+                else:
+                    to_process_count = total_items
+
+                st.markdown(f"**Jela za obradu: `{to_process_count}` od ukupno `{total_items}`**")
+
+                if not GEMINI_KEYS_LIST:
+                    st.warning("⚠️ Gemini API ključ nije pronađen. Provjeri secrets ili config.json.")
+
+                if st.button("🤖 GENERIŠI OPISE", type="primary", disabled=not GEMINI_KEYS_LIST or to_process_count == 0):
+                    # Odredi koja jela treba obraditi
+                    if 'Description' in df_desc.columns and not overwrite_existing:
+                        mask = df_desc['Description'].isna() | (df_desc['Description'].astype(str).str.strip() == '')
+                        names_to_process = df_desc.loc[mask, 'Product_Name'].tolist()
+                    else:
+                        names_to_process = df_desc['Product_Name'].tolist()
+
+                    # Batch po 50 jela (da ne pređemo limit tokena)
+                    BATCH_SIZE = 50
+                    batches = [names_to_process[i:i+BATCH_SIZE] for i in range(0, len(names_to_process), BATCH_SIZE)]
+                    
+                    all_descriptions = {}
+                    progress_bar = st.progress(0, text="AI piše opise...")
+                    
+                    try:
+                        for batch_idx, batch in enumerate(batches):
+                            result = generate_descriptions_batch(batch, GEMINI_KEYS_LIST, desc_language, desc_length)
+                            batch_descs = result.get("descriptions", {})
+                            all_descriptions.update(batch_descs)
+                            progress = (batch_idx + 1) / len(batches)
+                            progress_bar.progress(progress, text=f"Obrađeno {min((batch_idx+1)*BATCH_SIZE, len(names_to_process))} / {len(names_to_process)} jela...")
+
+                        progress_bar.progress(1.0, text="✅ Gotovo!")
+
+                        # Upiši opise nazad u DataFrame
+                        if 'Description' not in df_desc.columns:
+                            df_desc['Description'] = ''
+
+                        updated_count = 0
+                        for idx, row in df_desc.iterrows():
+                            name = str(row['Product_Name']).strip()
+                            if name in all_descriptions and all_descriptions[name]:
+                                df_desc.at[idx, 'Description'] = all_descriptions[name]
+                                updated_count += 1
+
+                        st.session_state['desc_df_result'] = df_desc
+                        st.session_state['desc_df_g'] = df_desc_g
+                        st.session_state['desc_df_a'] = df_desc_a
+                        st.session_state['desc_updated_count'] = updated_count
+
+                    except Exception as e:
+                        st.error(f"Greška: {e}")
+
+                # Prikaz rezultata
+                if 'desc_df_result' in st.session_state:
+                    st.success(f"🎉 Generisano {st.session_state['desc_updated_count']} opisa!")
+
+                    with st.expander("👀 POGLEDAJ REZULTAT SA OPISIMA", expanded=True):
+                        # Prikaži samo relevantne kolone
+                        preview_cols = ['Product_Name', 'Section', 'Price', 'Description']
+                        available_cols = [c for c in preview_cols if c in st.session_state['desc_df_result'].columns]
+                        st.dataframe(st.session_state['desc_df_result'][available_cols], height=500, use_container_width=True)
+
+                    excel_out = build_excel(
+                        st.session_state['desc_df_result'],
+                        st.session_state['desc_df_g'],
+                        st.session_state['desc_df_a']
+                    )
+                    st.download_button(
+                        "📥 DOWNLOAD EXCEL SA OPISIMA",
+                        excel_out,
+                        "menu_sa_opisima.xlsx",
+                        help="Preuzmi kompletan Excel fajl sa generisanim opisima jela"
+                    )
+
+        except Exception as e:
+            st.error(f"Greška pri čitanju fajla: {e}")
