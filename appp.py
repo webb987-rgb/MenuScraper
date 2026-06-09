@@ -454,22 +454,72 @@ with tab_edit:
 # --- TAB 5: AI OPISI ---
 with tab_desc:
     st.subheader("✍️ AI Generator Opisa Jela")
-    st.info("💡 Uploaduj Excel fajl sa menijem. AI će automatski generisati apetitne opise za sva jela i snimiti ih nazad u fajl.", icon="ℹ️")
+    st.info("💡 Uploaduj Excel, sliku ili PDF sa menijem. AI će automatski generisati apetitne opise za sva jela.", icon="ℹ️")
 
-    uploaded_desc_file = st.file_uploader("Upload Excel fajl (.xlsx):", type=["xlsx"], key="desc_uploader")
+    uploaded_desc_file = st.file_uploader(
+        "Upload fajl (Excel, slika ili PDF):",
+        type=["xlsx", "jpg", "jpeg", "png", "webp", "pdf"],
+        key="desc_uploader"
+    )
 
     if uploaded_desc_file:
         try:
-            sheets_desc = pd.read_excel(uploaded_desc_file, sheet_name=None)
-            df_desc = sheets_desc.get('Products', pd.DataFrame()).copy()
-            df_desc_g = sheets_desc.get('Attribute Groups', pd.DataFrame())
-            df_desc_a = sheets_desc.get('Attributes', pd.DataFrame())
+            file_type = uploaded_desc_file.type
+            df_desc = pd.DataFrame()
+            df_desc_g = pd.DataFrame()
+            df_desc_a = pd.DataFrame()
+            source_is_excel = False
+
+            # --- EXCEL ---
+            if file_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+                sheets_desc = pd.read_excel(uploaded_desc_file, sheet_name=None)
+                df_desc = sheets_desc.get('Products', pd.DataFrame()).copy()
+                df_desc_g = sheets_desc.get('Attribute Groups', pd.DataFrame())
+                df_desc_a = sheets_desc.get('Attributes', pd.DataFrame())
+                source_is_excel = True
+
+            # --- SLIKA ILI PDF ---
+            else:
+                if not GEMINI_KEYS_LIST:
+                    st.warning("⚠️ Gemini API ključ nije pronađen. Provjeri secrets ili config.json.")
+                    st.stop()
+
+                with st.spinner("🤖 AI čita meni iz fajla..."):
+                    file_data = uploaded_desc_file.read()
+                    uploaded_desc_file.seek(0)
+                    content = [{"mime_type": file_type, "data": file_data}]
+                    # Iskoristi postojeći extract koji vraća {sections: [{name, items: [{name, price, description}]}]}
+                    extracted = extract_menu_with_gemini_core(content, GEMINI_KEYS_LIST, currency)
+
+                # Pretvori u DataFrame isti kao Excel format
+                items_list = []
+                for section in extracted.get("sections", []):
+                    sec_name = section.get("name", "Menu").strip()
+                    for item in section.get("items", []):
+                        items_list.append({
+                            "External_ID": str(uuid.uuid4()),
+                            "Product_Name": str(item.get("name", "")).strip(),
+                            "Collection": "MENU",
+                            "Section": sec_name,
+                            "Price": item.get("price", 0),
+                            "Description": str(item.get("description", "")).strip(),
+                            "Image_1": "",
+                            "Attribute_Groups": "",
+                            "Is_Alcoholic": "NO",
+                            "Is_Tobacco": "NO",
+                            "SuperCollection": "",
+                            "Section_Order": 1,
+                            "Collection_Order": 1
+                        })
+                df_desc = pd.DataFrame(items_list)
+                st.success(f"✅ AI izvukao {len(df_desc)} jela iz fajla.")
 
             if df_desc.empty or 'Product_Name' not in df_desc.columns:
-                st.error("Fajl ne sadrži 'Products' sheet sa kolonom 'Product_Name'.")
+                st.error("Nije moguće pronaći listu jela. Provjeri format fajla.")
             else:
                 total_items = len(df_desc)
-                st.success(f"✅ Učitano {total_items} jela iz menija.")
+                if source_is_excel:
+                    st.success(f"✅ Učitano {total_items} jela iz Excel fajla.")
 
                 with st.expander("👀 POGLEDAJ UČITANU TABELU"):
                     st.dataframe(df_desc, height=400, use_container_width=True)
