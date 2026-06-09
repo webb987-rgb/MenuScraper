@@ -220,9 +220,23 @@ Every dish name from the input must appear as a key in the output. Return only r
         try:
             genai.configure(api_key=key)
             model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(prompt)
-            clean_json = re.sub(r'```json|```', '', response.text).strip()
-            return json.loads(clean_json)
+            response = model.generate_content(prompt, generation_config={"max_output_tokens": 8192})
+            raw = response.text.strip()
+            # Ukloni markdown backticks
+            clean = re.sub(r'```json|```', '', raw).strip()
+            # Izvuci samo JSON objekat između prve { i zadnje }
+            start = clean.find('{')
+            end = clean.rfind('}')
+            if start != -1 and end != -1:
+                clean = clean[start:end+1]
+            return json.loads(clean)
+        except json.JSONDecodeError as e:
+            last_error = e
+            if idx < len(api_keys_list) - 1:
+                st.warning(f"Key {idx+1} greška parsiranja. Pokušavam sljedeći ključ...")
+                continue
+            else:
+                raise Exception(f"JSON parsing greška. Last error: {last_error}")
         except Exception as e:
             last_error = e
             if idx < len(api_keys_list) - 1:
