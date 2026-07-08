@@ -320,6 +320,12 @@ def process_bolt_data(raw):
     return pd.DataFrame(items_list), pd.DataFrame(groups_raw), pd.DataFrame(attrs_raw), ordered_sections, detected_currency[0]
 
 # --- TAKEAWAY.COM SCRAPER LOGIC ---
+# Menu data is fetched DIRECTLY from the public JET menu CDN (no bot protection).
+# File names are fully derivable from the restaurant URL:
+#   manifest: {slug}_{country}_manifest_{lang}.json  -> categories + country
+#   items:    {slug}_{country}_items_{lang}.json     -> all items with prices
+TAKEAWAY_CDN = "https://globalmenucdn.eu-central-1.production.jet-external.com/"
+
 TAKEAWAY_CURRENCY_MAP = {
     "bg": "BGN", "ro": "RON", "hu": "HUF", "pl": "PLN", "cz": "CZK",
     "nl": "EUR", "at": "EUR", "de": "EUR", "lu": "EUR", "fr": "EUR",
@@ -351,151 +357,80 @@ def _find_key_recursive(obj, target_key):
                 return result
     return None
 
-def fetch_takeaway_data(restaurant_url, debug=False):
-    """Pokušaj: 1) curl_cffi, 2) plain requests, 3) Jina Reader"""
-    browser_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://www.google.com/",
-    }
+def parse_takeaway_url(url):
+    """URL format: takeaway.com/{country}(-{lang})?/menu/{slug}"""
+    m = re.search(r'takeaway\.com/([a-z]{2})(?:-([a-z]{2}))?/menu/([^/?#]+)', url)
+    if not m:
+        return None, None, None
+    return m.group(1), m.group(2) or "", m.group(3)
 
+def fetch_takeaway_data(restaurant_url, debug=False):
+    """Fetch menu directly from the public JET menu CDN — works on Streamlit Cloud."""
     def _log(msg):
         if debug:
             st.write(f"🔎 DEBUG: {msg}")
 
-    # Method 1: curl_cffi
-    if CURL_CFFI_AVAILABLE:
-        try:
-            _log("Trying curl_cffi...")
-            resp = cf_requests.get(restaurant_url, headers=browser_headers, timeout=20, impersonate="chrome130")
-            _log(f"curl_cffi status: {resp.status_code}")
-            if resp.status_code == 200 and '__NEXT_DATA__' in resp.text:
-                result = _parse_takeaway_page(resp.text, restaurant_url, debug)
-                if result:
-                    return result
-        except Exception as e:
-            _log(f"curl_cffi failed: {e}")
-
-    # Method 2: plain requests
-    try:
-        _log("Trying plain requests...")
-        resp = requests.get(restaurant_url, headers=browser_headers, timeout=20)
-        _log(f"plain requests status: {resp.status_code}")
-        if resp.status_code == 200 and '__NEXT_DATA__' in resp.text:
-            result = _parse_takeaway_page(resp.text, restaurant_url, debug)
-            if result:
-                return result
-    except Exception as e:
-        _log(f"plain requests failed: {e}")
-
-    # Method 3: Jina Reader (fallback)
-    try:
-        _log("Fallback: Using Jina Reader...")
-        jina_url = f"https://r.jina.ai/{restaurant_url}"
-        resp = requests.get(jina_url, headers={"Accept": "application/json"}, timeout=30)
-        _log(f"Jina status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            content = data.get("data", {}).get("content", "")
-            if content:
-                _log("Jina succeeded, parsing...")
-                result = _extract_takeaway_from_jina(content, restaurant_url, debug)
-                if result:
-                    return result
-    except Exception as e:
-        _log(f"Jina failed: {e}")
+    country, lang, slug = parse_takeaway_url(restaurant_url)
+    if not slug:
         if debug:
-            st.session_state['takeaway_last_error'] = f"All methods failed: {e}"
-
-    return None
-
-def _parse_takeaway_page(html_text, restaurant_url, debug):
-    """Parse original Takeaway HTML"""
-    try:
-        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.DOTALL)
-        if not match:
-            return None
-        next_data = json.loads(match.group(1))
-        top_categories = _find_key_recursive(next_data, "topLevelCategories")
-        items_url = _find_key_recursive(next_data, "itemsUrl")
-        country_code = _find_key_recursive(next_data, "fallbackCountryCode") or ""
-        if not top_categories or not items_url:
-            return None
-        items_full_url = "https://globalmenucdn.eu-central-1.production.jet-external.com/" + items_url
-        if CURL_CFFI_AVAILABLE:
-            items_resp = cf_requests.get(items_full_url, timeout=20, impersonate="chrome130")
-        else:
-            items_resp = requests.get(items_full_url, timeout=20)
-        items_data = items_resp.json()
-        return {"categories": top_categories, "items": items_data, "country_code": country_code}
-    except Exception as e:
+            st.session_state['takeaway_last_error'] = "URL not recognized — expected .../{country}/menu/{slug}"
         return None
 
-def _extract_takeaway_from_jina(text, url, debug):
-    """Extract iz Jina Reader teksta - sa Gemini ili bez"""
-    match = re.search(r'takeaway\.com/([a-z]{2})/', url)
-    country = match.group(1) if match else "bg"
-    
-    # Prvo pokušaj sa Gemini ako je dostupan
-    if GEMINI_KEYS_LIST:
-        try:
-            prompt = """From this restaurant menu text, extract menu items and prices. Return ONLY valid JSON:
-{"categories": [{"name": "CategoryName", "itemIds": [1,2,3]}], "items": {"Items": [{"Id": 1, "Name": "DishName", "Variations": [{"Name": "", "BasePrice": 12.50}], "Description": "", "ImageSources": []}]}, "country_code": "bg"}"""
-            
-            full_request = [text[:20000], prompt]
-            genai.configure(api_key=GEMINI_KEYS_LIST[0])
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(full_request)
-            clean_json = re.sub(r'```json|```', '', response.text).strip()
-            result = json.loads(clean_json)
-            if result.get("items", {}).get("Items"):
-                return result
-        except Exception as e:
-            pass
-    
-    # Fallback: Simple text parsing
-    return _simple_parse_menu(text, country)
+    _log(f"Parsed URL -> country={country}, lang={lang or '(default)'}, slug={slug}")
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-def _simple_parse_menu(text, country_code):
-    """Jednostavna parserica - ekstraktuj iz teksta bez AI"""
-    lines = text.split('\n')
-    items = []
-    item_id = 1
-    
-    for line in lines:
-        line = line.strip()
-        if not line or len(line) < 3:
-            continue
-        
-        # Traži linije sa cijenom (broj na kraju)
-        price_match = re.search(r'(\d+[.,]\d{2}|\d+)\s*(?:EUR|BGN|RON|HUF|CZK|RSD)?$', line)
-        
-        if price_match and len(line) > 5:
-            price_str = price_match.group(1).replace(',', '.')
-            try:
-                price = float(price_str)
-                item_name = line[:price_match.start()].strip()
-                
-                if item_name and len(item_name) > 2 and price > 0:
-                    items.append({
-                        "Id": item_id,
-                        "Name": item_name,
-                        "Variations": [{"Name": "", "BasePrice": price}],
-                        "Description": "",
-                        "ImageSources": []
-                    })
-                    item_id += 1
-            except:
-                pass
-    
-    return {
-        "categories": [{"name": "Menu", "itemIds": list(range(1, len(items) + 1))}],
-        "items": {"Items": items},
-        "country_code": country_code
-    }
+    # 1) Manifest (categories + country + items file name)
+    manifest = None
+    manifest_candidates = ([f"{slug}_{country}_manifest_{lang}.json"] if lang else []) + [f"{slug}_{country}_manifest.json"]
+    for name in manifest_candidates:
+        try:
+            r = requests.get(TAKEAWAY_CDN + name, headers=headers, timeout=20)
+            _log(f"manifest {name} -> {r.status_code}")
+            if r.status_code == 200:
+                manifest = r.json()
+                break
+        except Exception as e:
+            _log(f"manifest {name} failed: {e}")
+    if not manifest:
+        if debug:
+            st.session_state['takeaway_last_error'] = "Manifest not found on CDN — check the link/slug."
+        return None
+
+    # 2) Items (names, descriptions, prices, images)
+    items_data = None
+    items_candidates = []
+    if manifest.get("ItemsUrl"):
+        items_candidates.append(manifest["ItemsUrl"])
+    if lang:
+        items_candidates.append(f"{slug}_{country}_items_{lang}.json")
+    items_candidates.append(f"{slug}_{country}_items.json")
+    for name in items_candidates:
+        try:
+            r = requests.get(TAKEAWAY_CDN + name, headers=headers, timeout=20)
+            _log(f"items {name} -> {r.status_code}")
+            if r.status_code == 200:
+                items_data = r.json()
+                break
+        except Exception as e:
+            _log(f"items {name} failed: {e}")
+    if not items_data:
+        if debug:
+            st.session_state['takeaway_last_error'] = "Items file not found on CDN."
+        return None
+
+    # 3) Categories from all menus (delivery/pickup), dedupe by category Id
+    categories, seen = [], set()
+    for menu in manifest.get("Menus", []):
+        for cat in menu.get("Categories", []):
+            cid = cat.get("Id")
+            if cid in seen:
+                continue
+            seen.add(cid)
+            categories.append({"name": cat.get("Name", ""), "itemIds": cat.get("ItemIds", [])})
+
+    country_code = (manifest.get("CountryCode") or country or "").lower()
+    _log(f"Loaded {len(categories)} categories, {len(items_data.get('Items', []))} items, country={country_code}")
+    return {"categories": categories, "items": items_data, "country_code": country_code}
 
 def process_takeaway_data(raw, force_eur=False, debug=False):
     if not raw:
@@ -539,11 +474,14 @@ def process_takeaway_data(raw, force_eur=False, debug=False):
                     price = convert_takeaway_price_to_eur(price, source_currency)
                     output_currency = "EUR"
                 var_name = var.get("Name", "")
-                display_name = item.get("Name", "") if not var_name else f"{item.get('Name', '')} ({var_name})"
+                item_name = item.get("Name", "")
+                display_name = item_name if (not var_name or var_name == item_name) else f"{item_name} ({var_name})"
                 img = ""
                 img_sources = item.get("ImageSources", [])
                 if img_sources:
                     img = img_sources[0].get("Path", "")
+                    # Cloudinary path contains a {transformations} placeholder
+                    img = img.replace("{transformations}", "w_960,c_limit,f_auto,q_auto")
 
                 items_list.append({
                     "External_ID": str(uuid.uuid4()), "Product_Name": display_name,
@@ -760,7 +698,7 @@ with tab_takeaway:
     with col_eur:
         force_eur_takeaway = st.checkbox("Convert to EUR (e.g. Bulgaria)", key="takeaway_force_eur", value=True)
 
-    if st.button("🚀 RUN", key="takeaway_run", help="Extract structure and items from Takeaway.com"):
+    if st.button("🚀 RUN", key="takeaway_run", help="Extract structure and items directly from the Takeaway menu CDN"):
         if link_input_takeaway.strip():
             raw = fetch_takeaway_data(link_input_takeaway.strip(), debug=debug_takeaway)
             if raw:
@@ -779,7 +717,7 @@ with tab_takeaway:
                 if err_detail:
                     st.error(f"Error: {err_detail}")
                 else:
-                    st.error("Could not fetch page — check link. Enable 'Show debug info' for details")
+                    st.error("Could not fetch menu — check link. Enable 'Show debug info' for details")
         else:
             st.error("Paste a link first")
 
