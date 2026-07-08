@@ -352,13 +352,47 @@ def _find_key_recursive(obj, target_key):
     return None
 
 def fetch_takeaway_data(restaurant_url, debug=False):
-    """Koristi Jina Reader kao primary pristup"""
+    """Pokušaj: 1) curl_cffi, 2) plain requests, 3) Jina Reader"""
+    browser_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.google.com/",
+    }
+
     def _log(msg):
         if debug:
             st.write(f"🔎 DEBUG: {msg}")
 
+    # Method 1: curl_cffi
+    if CURL_CFFI_AVAILABLE:
+        try:
+            _log("Trying curl_cffi...")
+            resp = cf_requests.get(restaurant_url, headers=browser_headers, timeout=20, impersonate="chrome130")
+            _log(f"curl_cffi status: {resp.status_code}")
+            if resp.status_code == 200 and '__NEXT_DATA__' in resp.text:
+                result = _parse_takeaway_page(resp.text, restaurant_url, debug)
+                if result:
+                    return result
+        except Exception as e:
+            _log(f"curl_cffi failed: {e}")
+
+    # Method 2: plain requests
     try:
-        _log(f"Fetching: {restaurant_url}")
+        _log("Trying plain requests...")
+        resp = requests.get(restaurant_url, headers=browser_headers, timeout=20)
+        _log(f"plain requests status: {resp.status_code}")
+        if resp.status_code == 200 and '__NEXT_DATA__' in resp.text:
+            result = _parse_takeaway_page(resp.text, restaurant_url, debug)
+            if result:
+                return result
+    except Exception as e:
+        _log(f"plain requests failed: {e}")
+
+    # Method 3: Jina Reader (fallback)
+    try:
+        _log("Fallback: Using Jina Reader...")
         jina_url = f"https://r.jina.ai/{restaurant_url}"
         resp = requests.get(jina_url, headers={"Accept": "application/json"}, timeout=30)
         _log(f"Jina status: {resp.status_code}")
@@ -367,51 +401,67 @@ def fetch_takeaway_data(restaurant_url, debug=False):
             data = resp.json()
             content = data.get("data", {}).get("content", "")
             if content:
-                _log("Jina Reader succeeded, parsing...")
-                
-                extracted = _extract_takeaway_from_text(content, restaurant_url, debug)
-                if extracted:
-                    return extracted
-                    
+                _log("Jina succeeded, parsing...")
+                result = _extract_takeaway_from_jina(content, restaurant_url, debug)
+                if result:
+                    return result
     except Exception as e:
-        _log(f"Error: {e}")
+        _log(f"Jina failed: {e}")
         if debug:
-            st.session_state['takeaway_last_error'] = f"Fetch error: {e}"
+            st.session_state['takeaway_last_error'] = f"All methods failed: {e}"
 
     return None
 
-def _extract_takeaway_from_text(text, url, debug):
-    """Ekstraktuj podatke iz Jina Reader teksta"""
+def _parse_takeaway_page(html_text, restaurant_url, debug):
+    """Parse original Takeaway HTML"""
     try:
-        if GEMINI_KEYS_LIST:
-            prompt = """Extract menu from this restaurant text. Return ONLY valid JSON:
-{"categories": [{"name": "Category Name", "itemIds": [1,2], "items": []}], "items": {"Items": [{"Id": 1, "Name": "Dish", "Variations": [{"Name": "", "BasePrice": 15.50}], "Description": "", "ImageSources": []}]}, "country_code": "bg"}"""
-            
-            try:
-                full_request = [text[:20000], prompt]
-                genai.configure(api_key=GEMINI_KEYS_LIST[0])
-                model = genai.GenerativeModel('gemini-2.5-flash')
-                response = model.generate_content(full_request)
-                clean_json = re.sub(r'```json|```', '', response.text).strip()
-                return json.loads(clean_json)
-            except Exception as e:
-                pass
-        
-        return _simple_takeaway_parse(text, url)
-        
+        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.DOTALL)
+        if not match:
+            return None
+        next_data = json.loads(match.group(1))
+        top_categories = _find_key_recursive(next_data, "topLevelCategories")
+        items_url = _find_key_recursive(next_data, "itemsUrl")
+        country_code = _find_key_recursive(next_data, "fallbackCountryCode") or ""
+        if not top_categories or not items_url:
+            return None
+        items_full_url = "https://globalmenucdn.eu-central-1.production.jet-external.com/" + items_url
+        if CURL_CFFI_AVAILABLE:
+            items_resp = cf_requests.get(items_full_url, timeout=20, impersonate="chrome130")
+        else:
+            items_resp = requests.get(items_full_url, timeout=20)
+        items_data = items_resp.json()
+        return {"categories": top_categories, "items": items_data, "country_code": country_code}
     except Exception as e:
         return None
 
-def _simple_takeaway_parse(text, url):
-    """Jednostavna parserica ako Gemini ne radi"""
-    match = re.search(r'takeaway\.com/([a-z]{2})/', url)
-    country = match.group(1) if match else "bg"
+def _extract_takeaway_from_jina(text, url, debug):
+    """Extract iz Jina Reader teksta sa Gemini"""
+    if not GEMINI_KEYS_LIST:
+        match = re.search(r'takeaway\.com/([a-z]{2})/', url)
+        country = match.group(1) if match else "bg"
+        return {
+            "categories": [{"name": "Menu", "itemIds": []}],
+            "items": {"Items": []},
+            "country_code": country
+        }
     
-    return {
-        "categories": [{"name": "Menu", "itemIds": []}],
-        "items": {"Items": []},
-        "country_code": country
-    }
+    try:
+        prompt = """From this restaurant menu text, extract ONLY a valid JSON with this structure:
+{"categories": [{"name": "CategoryName", "itemIds": [1,2,3]}], "items": {"Items": [{"Id": 1, "Name": "DishName", "Variations": [{"Name": "", "BasePrice": 12.50}], "Description": "", "ImageSources": []}]}, "country_code": "bg"}
+Extract all menu items with prices. Return ONLY valid JSON."""
+        
+        full_request = [text[:25000], prompt]
+        genai.configure(api_key=GEMINI_KEYS_LIST[0])
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(full_request)
+        clean_json = re.sub(r'```json|```', '', response.text).strip()
+        result = json.loads(clean_json)
+        if result.get("items", {}).get("Items"):
+            return result
+    except Exception as e:
+        pass
+    
+    return None
 
 def process_takeaway_data(raw, force_eur=False, debug=False):
     if not raw:
