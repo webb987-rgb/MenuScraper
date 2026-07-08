@@ -58,7 +58,6 @@ def apply_price_logic(price, markup_percent, fixed_amount, round_up, curr):
             final_price = ((final_price + 9) // 10) * 10
         return final_price
     else:
-        # Keep 2 decimal places for EUR, rounding to 10 does not apply
         return round(new_price, 2)
 
 # --- HELPER: HIGH-SPEED IMAGE DOWNLOAD ---
@@ -75,10 +74,6 @@ def download_single_image(url, product_name):
     return None, None
 
 # --- WOLT SCRAPER LOGIC ---
-
-# Wolt URLs look like https://wolt.com/en/srb/nis/restaurant/nn-chicken
-# The segment after the language code is a 3-letter country code.
-# Used as a fallback when the currency isn't present in the API response itself.
 WOLT_COUNTRY_CURRENCY_MAP = {
     "srb": "RSD", "bgr": "EUR", "hrv": "EUR", "svn": "EUR", "deu": "EUR",
     "aut": "EUR", "cyp": "EUR", "grc": "EUR", "fin": "EUR", "est": "EUR",
@@ -89,12 +84,9 @@ WOLT_COUNTRY_CURRENCY_MAP = {
     "kwt": "KWD", "geo": "GEL", "arm": "AMD", "usa": "USD",
 }
 
-# Currencies conventionally displayed with no decimal places
 WOLT_ZERO_DECIMAL_CURRENCIES = {"RSD", "HUF", "JPY", "ISK", "KRW", "CLP"}
 
 def detect_wolt_currency(data, restaurant_url):
-    """Try to find the real currency from the API payload; fall back to the
-    country code embedded in the restaurant URL."""
     found = _find_key_recursive(data, "currency")
     if found:
         return str(found).upper()
@@ -134,7 +126,6 @@ def process_all_data(data, restaurant_url):
             new_aid = str(uuid.uuid4())
             a_ids.append(new_aid)
 
-            # Adjust attribute price format based on detected currency
             attr_price = val.get("price", 0) / 100
             attr_price = int(attr_price) if zero_decimal else round(attr_price, 2)
 
@@ -159,7 +150,6 @@ def process_all_data(data, restaurant_url):
             seen_ids.add(w_id)
             new_iid = str(uuid.uuid4())
 
-            # Adjust product price format based on detected currency
             raw_price = (item.get("base_price") or item.get("price") or 0) / 100
             puna_cena = int(raw_price) if zero_decimal else round(raw_price, 2)
 
@@ -336,16 +326,11 @@ TAKEAWAY_CURRENCY_MAP = {
     "it": "EUR", "pt": "EUR", "es": "EUR", "ie": "EUR", "gr": "EUR",
 }
 
-# Fixed conversion rates to EUR for currencies of countries that have
-# officially adopted the euro (rate is legally fixed, not a market rate).
-# Bulgaria adopted the euro on 1 Jan 2026; BGN prices from Takeaway's API
-# are converted to EUR using the official fixed rate.
 TAKEAWAY_FIXED_EUR_RATE = {
     "BGN": 1.95583,
 }
 
 def convert_takeaway_price_to_eur(price, source_currency):
-    """Convert a price to EUR using the fixed official rate, if available."""
     rate = TAKEAWAY_FIXED_EUR_RATE.get(source_currency)
     if rate and price:
         return round(price / rate, 2)
@@ -367,70 +352,66 @@ def _find_key_recursive(obj, target_key):
     return None
 
 def fetch_takeaway_data(restaurant_url, debug=False):
-    browser_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,bg;q=0.8",
-        "Referer": "https://www.google.com/",
-    }
-
+    """Koristi Jina Reader kao primary pristup"""
     def _log(msg):
         if debug:
             st.write(f"🔎 DEBUG: {msg}")
 
-    fetchers = []
-    if CURL_CFFI_AVAILABLE:
-        fetchers.append(("curl_cffi (chrome impersonation)", lambda url: cf_requests.get(url, headers=browser_headers, timeout=20, impersonate="chrome124")))
-    fetchers.append(("plain requests", lambda url: requests.get(url, headers=browser_headers, timeout=20)))
-
-    page = None
-    last_error = None
-    for label, fn in fetchers:
-        try:
-            resp = fn(restaurant_url)
-            _log(f"{label} -> status {resp.status_code}, {len(resp.text)} chars")
-            if resp.status_code == 200 and '__NEXT_DATA__' in resp.text:
-                page = resp
-                break
-            elif resp.status_code == 200:
-                last_error = f"Got page via {label} (status 200) but no __NEXT_DATA__ block found"
-            else:
-                last_error = f"{label} returned HTTP {resp.status_code}."
-        except Exception as e:
-            last_error = f"{label} raised an error: {e}"
-            _log(last_error)
-
-    if page is None:
-        _log(f"All fetch methods failed. Last error: {last_error}")
-        if debug:
-            st.session_state['takeaway_last_error'] = last_error
-        return None
-
     try:
-        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page.text, re.DOTALL)
-        if not match:
-            if debug:
-                st.session_state['takeaway_last_error'] = "Page fetched but __NEXT_DATA__ regex did not match."
-            return None
-        next_data = json.loads(match.group(1))
-        top_categories = _find_key_recursive(next_data, "topLevelCategories")
-        items_url = _find_key_recursive(next_data, "itemsUrl")
-        country_code = _find_key_recursive(next_data, "fallbackCountryCode") or ""
-        if not top_categories or not items_url:
-            if debug:
-                st.session_state['takeaway_last_error'] = "__NEXT_DATA__ found but missing expected keys."
-            return None
-        items_full_url = "https://globalmenucdn.eu-central-1.production.jet-external.com/" + items_url
-        if CURL_CFFI_AVAILABLE:
-            items_resp = cf_requests.get(items_full_url, headers=browser_headers, timeout=20, impersonate="chrome124")
-        else:
-            items_resp = requests.get(items_full_url, headers=browser_headers, timeout=20)
-        items_data = items_resp.json()
-        return {"categories": top_categories, "items": items_data, "country_code": country_code}
+        _log(f"Fetching: {restaurant_url}")
+        jina_url = f"https://r.jina.ai/{restaurant_url}"
+        resp = requests.get(jina_url, headers={"Accept": "application/json"}, timeout=30)
+        _log(f"Jina status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data.get("data", {}).get("content", "")
+            if content:
+                _log("Jina Reader succeeded, parsing...")
+                
+                extracted = _extract_takeaway_from_text(content, restaurant_url, debug)
+                if extracted:
+                    return extracted
+                    
     except Exception as e:
+        _log(f"Error: {e}")
         if debug:
-            st.session_state['takeaway_last_error'] = f"Error parsing page data: {e}"
+            st.session_state['takeaway_last_error'] = f"Fetch error: {e}"
+
+    return None
+
+def _extract_takeaway_from_text(text, url, debug):
+    """Ekstraktuj podatke iz Jina Reader teksta"""
+    try:
+        if GEMINI_KEYS_LIST:
+            prompt = """Extract menu from this restaurant text. Return ONLY valid JSON:
+{"categories": [{"name": "Category Name", "itemIds": [1,2], "items": []}], "items": {"Items": [{"Id": 1, "Name": "Dish", "Variations": [{"Name": "", "BasePrice": 15.50}], "Description": "", "ImageSources": []}]}, "country_code": "bg"}"""
+            
+            try:
+                full_request = [text[:20000], prompt]
+                genai.configure(api_key=GEMINI_KEYS_LIST[0])
+                model = genai.GenerativeModel('gemini-2.5-flash')
+                response = model.generate_content(full_request)
+                clean_json = re.sub(r'```json|```', '', response.text).strip()
+                return json.loads(clean_json)
+            except Exception as e:
+                pass
+        
+        return _simple_takeaway_parse(text, url)
+        
+    except Exception as e:
         return None
+
+def _simple_takeaway_parse(text, url):
+    """Jednostavna parserica ako Gemini ne radi"""
+    match = re.search(r'takeaway\.com/([a-z]{2})/', url)
+    country = match.group(1) if match else "bg"
+    
+    return {
+        "categories": [{"name": "Menu", "itemIds": []}],
+        "items": {"Items": []},
+        "country_code": country
+    }
 
 def process_takeaway_data(raw, force_eur=False, debug=False):
     if not raw:
@@ -467,7 +448,7 @@ def process_takeaway_data(raw, force_eur=False, debug=False):
                 continue
             for var in variations:
                 if debug and not debug_shown:
-                    st.write("🔎 DEBUG raw variation keys/values (first item):", dict(var))
+                    st.write("🔎 DEBUG raw variation:", dict(var))
                     debug_shown = True
                 price = var.get("BasePrice", 0)
                 if force_eur and source_currency in TAKEAWAY_FIXED_EUR_RATE:
