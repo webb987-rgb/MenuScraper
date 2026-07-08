@@ -435,33 +435,67 @@ def _parse_takeaway_page(html_text, restaurant_url, debug):
         return None
 
 def _extract_takeaway_from_jina(text, url, debug):
-    """Extract iz Jina Reader teksta sa Gemini"""
-    if not GEMINI_KEYS_LIST:
-        match = re.search(r'takeaway\.com/([a-z]{2})/', url)
-        country = match.group(1) if match else "bg"
-        return {
-            "categories": [{"name": "Menu", "itemIds": []}],
-            "items": {"Items": []},
-            "country_code": country
-        }
+    """Extract iz Jina Reader teksta - sa Gemini ili bez"""
+    match = re.search(r'takeaway\.com/([a-z]{2})/', url)
+    country = match.group(1) if match else "bg"
     
-    try:
-        prompt = """From this restaurant menu text, extract ONLY a valid JSON with this structure:
-{"categories": [{"name": "CategoryName", "itemIds": [1,2,3]}], "items": {"Items": [{"Id": 1, "Name": "DishName", "Variations": [{"Name": "", "BasePrice": 12.50}], "Description": "", "ImageSources": []}]}, "country_code": "bg"}
-Extract all menu items with prices. Return ONLY valid JSON."""
+    # Prvo pokušaj sa Gemini ako je dostupan
+    if GEMINI_KEYS_LIST:
+        try:
+            prompt = """From this restaurant menu text, extract menu items and prices. Return ONLY valid JSON:
+{"categories": [{"name": "CategoryName", "itemIds": [1,2,3]}], "items": {"Items": [{"Id": 1, "Name": "DishName", "Variations": [{"Name": "", "BasePrice": 12.50}], "Description": "", "ImageSources": []}]}, "country_code": "bg"}"""
+            
+            full_request = [text[:20000], prompt]
+            genai.configure(api_key=GEMINI_KEYS_LIST[0])
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            response = model.generate_content(full_request)
+            clean_json = re.sub(r'```json|```', '', response.text).strip()
+            result = json.loads(clean_json)
+            if result.get("items", {}).get("Items"):
+                return result
+        except Exception as e:
+            pass
+    
+    # Fallback: Simple text parsing
+    return _simple_parse_menu(text, country)
+
+def _simple_parse_menu(text, country_code):
+    """Jednostavna parserica - ekstraktuj iz teksta bez AI"""
+    lines = text.split('\n')
+    items = []
+    item_id = 1
+    
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) < 3:
+            continue
         
-        full_request = [text[:25000], prompt]
-        genai.configure(api_key=GEMINI_KEYS_LIST[0])
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        response = model.generate_content(full_request)
-        clean_json = re.sub(r'```json|```', '', response.text).strip()
-        result = json.loads(clean_json)
-        if result.get("items", {}).get("Items"):
-            return result
-    except Exception as e:
-        pass
+        # Traži linije sa cijenom (broj na kraju)
+        price_match = re.search(r'(\d+[.,]\d{2}|\d+)\s*(?:EUR|BGN|RON|HUF|CZK|RSD)?$', line)
+        
+        if price_match and len(line) > 5:
+            price_str = price_match.group(1).replace(',', '.')
+            try:
+                price = float(price_str)
+                item_name = line[:price_match.start()].strip()
+                
+                if item_name and len(item_name) > 2 and price > 0:
+                    items.append({
+                        "Id": item_id,
+                        "Name": item_name,
+                        "Variations": [{"Name": "", "BasePrice": price}],
+                        "Description": "",
+                        "ImageSources": []
+                    })
+                    item_id += 1
+            except:
+                pass
     
-    return None
+    return {
+        "categories": [{"name": "Menu", "itemIds": list(range(1, len(items) + 1))}],
+        "items": {"Items": items},
+        "country_code": country_code
+    }
 
 def process_takeaway_data(raw, force_eur=False, debug=False):
     if not raw:
